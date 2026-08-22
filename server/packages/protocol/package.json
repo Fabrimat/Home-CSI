@@ -1,0 +1,17 @@
+{
+  "name": "@homecsi/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "print-example": "tsx src/print-example.ts"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  }
+}

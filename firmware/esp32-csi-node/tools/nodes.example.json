@@ -1,0 +1,59 @@
+{
+  "_readme": [
+    "Copy this to nodes.json and edit it. nodes.json is gitignored because it",
+    "contains your SSID, password and server hostname -- it is not as secret",
+    "as the PSKs in secrets/keys.json, but it is not public either.",
+    "",
+    "Anything under 'defaults' applies to every node; anything inside a node",
+    "entry overrides it. Only node_id is mandatory per node.",
+    "",
+    "The 'allowlist' is the list of the OTHER nodes' STA MAC addresses. That",
+    "is what lets a node tell a peer's broadcast sounding (the primary",
+    "signal) apart from a neighbour's microwave-adjacent laptop (garnish),",
+    "and it is what the two separate bandwidth budgets key off. You will not",
+    "know the MACs until each board has been booted once -- csi-hello and the",
+    "main firmware both print 'STA MAC' on startup. Provision once with an",
+    "empty allowlist, collect the MACs, then re-provision."
+  ],
+
+  "defaults": {
+    "ap_ssid": "homecsi-sense",
+    "ap_password": "change-me-on-the-dedicated-ap",
+    "channel": 6,
+
+    "server_host": "ingest.example.com",
+    "server_port": 5566,
+    "sntp_server": "pool.ntp.org",
+
+    "sounding_interval_ms": 100,
+    "sounding_jitter_pct": 25,
+    "rssi_floor_dbm": -85,
+    "allowlist_enforced": false,
+
+    "max_records_per_batch": 16,
+    "flush_budget_ms": 200,
+    "heartbeat_interval_ms": 15000,
+    "reconnect_reboot_s": 900,
+
+    "bw_sounding_rps": 50,
+    "bw_foreign_rps": 5,
+    "bw_bytes_per_sec": 32768,
+    "decimate_foreign_start_pct": 40,
+    "decimate_sounding_start_pct": 70,
+    "decimate_full_pct": 95,
+    "decimate_max_divisor": 8,
+
+    "debug_uart": false,
+    "debug_udp": false,
+
+    "allowlist": []
+  },
+
+  "nodes": [
+    { "node_id": 1, "name": "living-room", "location": "bookshelf, west wall" },
+    { "node_id": 2, "name": "kitchen",     "location": "top of the fridge" },
+    { "node_id": 3, "name": "hallway",     "location": "shelf by the stairs" },
+    { "node_id": 4, "name": "bedroom",     "location": "chest of drawers",
+      "debug_uart": false }
+  ]
+}

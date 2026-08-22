@@ -1,0 +1,62 @@
+# sdkconfig.defaults - Home CSI node
+#
+# Every setting here is load-bearing; the comment says why. Anything not
+# listed is left at the ESP-IDF default on purpose.
+#
+# NOTE: these have been written against ESP-IDF v5.x symbol names but have
+# NOT been validated by an actual build (no IDF toolchain was available when
+# this was written). If `idf.py build` warns that a symbol is unknown, that
+# is a rename between IDF versions, not a design decision - check
+# firmware/bringup/README.md.
+
+CONFIG_IDF_TARGET="esp32"
+
+# --- partition table ---------------------------------------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# Smallest plausible flash; see the header of partitions.csv. Raise this only
+# after `esptool.py flash_id` has confirmed a bigger part.
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE_DETECT=y
+
+# --- Wi-Fi / CSI -------------------------------------------------------
+# THE reason this project exists. Without it esp_wifi_set_csi() fails.
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+# Do not let the Wi-Fi driver persist its own config in NVS: node_config is
+# the single source of truth and a stale stored SSID is a nasty ghost bug.
+CONFIG_ESP_WIFI_NVS_ENABLED=n
+# More static RX buffers => fewer CSI callbacks lost during bursts. Each is
+# ~1.6 kB of internal RAM, so this is the main RAM/robustness knob.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+# AMPDU RX on: HT frames from the AP are aggregated, and turning it off
+# reduces the number of decodable HT frames (i.e. fewer CSI records).
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y
+
+# --- crypto ------------------------------------------------------------
+# ChaCha20-Poly1305 per docs/protocol.md section 5.
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_POLY1305_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+
+# --- watchdogs ---------------------------------------------------------
+# A wedged uplink or capture task must reboot the node, not sit there dark.
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_INT_WDT=y
+
+# --- FreeRTOS / timing -------------------------------------------------
+# 1 kHz tick so the sounding scheduler and flush-time budget have millisecond
+# granularity instead of 10 ms.
+CONFIG_FREERTOS_HZ=1000
+
+# --- size / logging ----------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# --- things we do not use ----------------------------------------------
+CONFIG_BT_ENABLED=n
+CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y

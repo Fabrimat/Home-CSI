@@ -1,0 +1,36 @@
+# Home CSI — Caddy reverse proxy config.
+#
+# Referenced from ops/docker-compose.yml (`caddy` service, mounted read-only
+# at /etc/caddy/Caddyfile). {$VAR} syntax reads container environment
+# variables, which the compose file populates from ops/.env.
+#
+# Caddy issues and renews a Let's Encrypt certificate automatically for
+# {$HOMECSI_DOMAIN} the first time it starts, as long as:
+#   - DNS for that domain already points at this VPS's public IP, and
+#   - ports 80 and 443 are reachable from the Internet (see
+#     ops/hardening/harden.sh for the firewall rules that allow this).
+
+{
+	# Global options block: sets the ACME account email used for Let's
+	# Encrypt certificate issuance/renewal notices (expiry warnings, etc).
+	email {$HOMECSI_ACME_EMAIL}
+}
+
+{$HOMECSI_DOMAIN} {
+	# Caddy's reverse_proxy natively forwards the Connection/Upgrade headers
+	# needed for WebSocket upgrades - no special directive is required for
+	# this to work, but it is easy to break by adding a proxy in front that
+	# strips those headers, so do not put anything else between the
+	# Internet and this Caddyfile without checking it preserves them. The
+	# debug UI's live WebSocket feed depends on this working correctly.
+	reverse_proxy api:8080
+
+	# Structured access log to stdout, picked up by the `caddy` service's
+	# json-file logging driver limits configured in ops/docker-compose.yml.
+	log {
+		output stdout
+		format json
+	}
+
+	encode zstd gzip
+}

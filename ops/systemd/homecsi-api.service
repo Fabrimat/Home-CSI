@@ -1,0 +1,30 @@
+[Unit]
+Description=Home CSI - api (Fastify REST + WebSocket debug server)
+Documentation=https://github.com/ (see docs/deployment.md in the repo)
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Requires=postgresql.service
+
+[Service]
+Type=simple
+User=homecsi
+Group=homecsi
+WorkingDirectory=/opt/homecsi/server
+EnvironmentFile=/etc/homecsi/homecsi.env
+ExecStart=/usr/bin/node packages/cli/dist/cli.js serve
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homecsi-api
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/homecsi/data
+
+[Install]
+WantedBy=multi-user.target

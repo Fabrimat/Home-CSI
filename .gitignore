@@ -1,0 +1,44 @@
+# --- Node / TypeScript (server/) ---
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+npm-debug.log*
+
+# --- ESP-IDF (firmware/) ---
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+firmware/**/managed_components/
+firmware/**/dependencies.lock
+
+# --- Python (packages/features, tooling, notebooks) ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# --- Data: captures, DB volumes, local runtime state ---
+# Directory structure is kept via .gitkeep files; contents are not tracked.
+data/**
+!data/**/
+!data/**/.gitkeep
+*.pcap
+*.pcapng
+
+# --- Editor / OS ---
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Vite build output for the debug UI (built by ops/Dockerfile and
+# `npm run build --workspace=@homecsi/web`; never committed).
+ui-dist/

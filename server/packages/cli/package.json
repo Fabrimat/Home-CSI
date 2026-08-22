@@ -1,0 +1,26 @@
+{
+  "name": "@homecsi/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "homecsi": "./dist/index.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@homecsi/config": "0.1.0",
+    "@homecsi/db": "0.1.0",
+    "@homecsi/ingest": "0.1.0",
+    "@homecsi/storage": "0.1.0",
+    "@homecsi/features": "0.1.0",
+    "@homecsi/occupancy": "0.1.0",
+    "@homecsi/labeling": "0.1.0",
+    "@homecsi/api": "0.1.0",
+    "commander": "^12.1.0",
+    "pino": "^9.4.0"
+  }
+}

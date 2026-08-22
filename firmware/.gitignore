@@ -1,0 +1,34 @@
+# Host test build output (firmware/tests/build/test_*.exe, *.pdb, *.obj ...).
+# These are rebuilt in seconds by `python run_tests.py`; nothing here is a
+# source artifact.
+tests/build/
+
+# ESP-IDF build output and per-developer configuration.
+# sdkconfig.defaults IS tracked (it is the reviewed configuration);
+# sdkconfig is the generated, machine-local expansion of it and is not.
+**/build/
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+dependencies.lock
+managed_components/
+
+# Provisioning secrets. tools/provision.py also drops a belt-and-braces
+# .gitignore inside these directories as it creates them, but the moment a
+# per-node PSK lands on disk is not the moment to be relying on one layer of
+# protection.
+esp32-csi-node/tools/secrets/
+esp32-csi-node/tools/nodes.json
+*.key
+keys.json
+
+# Stock-firmware backups taken during bring-up. These are multi-megabyte
+# binaries and they are the operator's only route back to the Makeblock
+# firmware -- keep them, back them up, do not commit them.
+bringup/backups/
+*.stock.bin
+
+# Editor / OS noise
+.vscode/
+*.swp
+.DS_Store

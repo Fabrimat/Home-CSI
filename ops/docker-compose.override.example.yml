@@ -1,0 +1,33 @@
+# Local-development override for ops/docker-compose.yml.
+#
+# Usage:
+#   cp ops/docker-compose.override.example.yml ops/docker-compose.override.yml
+#   docker compose -f ops/docker-compose.yml -f ops/docker-compose.override.yml \
+#     up -d timescaledb migrate ingest api
+#
+# Differences from production:
+#   - Postgres is published to 127.0.0.1 so you can `psql` / connect a GUI
+#     client from the host for inspection and debugging.
+#   - The API is published directly to 127.0.0.1 instead of only being
+#     reachable via Caddy - convenient for local testing without TLS/DNS.
+#   - Caddy is NOT started. Compose has no clean way to "delete" a service
+#     via an override file (there is no service-removal merge key in the
+#     Compose spec used here), so the correct way to "drop Caddy" is to
+#     simply not include it in the `up` service list, as shown above. If you
+#     run a bare `docker compose ... up -d` with both files loaded, Caddy
+#     WILL still start (it just won't be useful without real DNS/TLS) -
+#     always pass the explicit service list for local dev.
+#
+# NEVER apply this override on the public VPS: it publishes Postgres and the
+# API's bearer-token-protected port more permissively than the hardening
+# model documented in docs/deployment.md assumes, even though it binds to
+# 127.0.0.1 only.
+
+services:
+  timescaledb:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  api:
+    ports:
+      - "127.0.0.1:8080:8080"

@@ -1,0 +1,35 @@
+menu "csi-hello"
+
+config CSIHELLO_WIFI_SSID
+    string "AP SSID to join"
+    default "myssid"
+    help
+      Any 2.4 GHz AP will do for a first smoke test - it does not have to be
+      the dedicated sensing AP yet. The point of this app is only to prove
+      that this board produces CSI at all.
+
+config CSIHELLO_WIFI_PASSWORD
+    string "AP password (empty for an open network)"
+    default ""
+
+config CSIHELLO_CHANNEL_HINT
+    int "Channel hint (0 = let the driver scan)"
+    range 0 14
+    default 0
+
+config CSIHELLO_PRINT_EVERY_N
+    int "Print one line per N CSI callbacks"
+    range 1 1000
+    default 1
+    help
+      At close range a busy channel can produce hundreds of callbacks per
+      second, which floods the UART and makes the output unreadable. Raise
+      this to thin the printout. The counters printed on each line are of
+      ALL callbacks, not just printed ones.
+
+config CSIHELLO_AMPLITUDES
+    int "How many subcarrier amplitudes to print per line"
+    range 0 32
+    default 6
+
+endmenu

@@ -1,0 +1,280 @@
+menu "Home CSI node"
+
+comment "Per-node identity and secrets live in NVS, not here."
+comment "Everything below is a BENCH FALLBACK used only when the NVS key is absent."
+
+config HCS_ALLOW_KCONFIG_FALLBACK
+    bool "Allow Kconfig fallbacks when an NVS key is missing"
+    default y
+    help
+      When enabled, a node whose NVS has not been provisioned will fall back
+      to the compile-time values in this menu. That is convenient on the
+      bench and dangerous in the field, because it lets an unprovisioned
+      board come up with a default (or empty) PSK.
+
+      Turn this OFF for production images: the node will then refuse to
+      start the uplink unless NVS supplies node_id, PSK, server and Wi-Fi
+      credentials, and will say exactly which key is missing.
+
+menu "Identity fallback (bench only)"
+
+config HCS_DEFAULT_NODE_ID
+    int "Fallback node_id (1-65535, 0 is invalid)"
+    range 0 65535
+    default 0
+    help
+      0 means "not set": the node will refuse to send. Set a real id here
+      only for bench work. Production nodes get this from NVS
+      (tools/provision.py).
+
+config HCS_DEFAULT_PSK_HEX
+    string "Fallback 32-byte PSK as 64 hex chars (EMPTY = none)"
+    default ""
+    help
+      LEAVE THIS EMPTY. A key committed to a Kconfig file is not a secret.
+      It exists only so a developer can run a bench node against a local
+      server without provisioning NVS first. If it is empty the node will
+      not send anything.
+
+      Reusing one key across nodes breaks the nonce-uniqueness argument in
+      docs/protocol.md section 4, so never use this on more than one board
+      at a time.
+
+endmenu
+
+menu "Network fallback (bench only)"
+
+config HCS_DEFAULT_AP_SSID
+    string "Fallback dedicated-AP SSID"
+    default ""
+
+config HCS_DEFAULT_AP_PASSWORD
+    string "Fallback dedicated-AP password"
+    default ""
+
+config HCS_DEFAULT_SERVER_HOST
+    string "Fallback ingest host (DNS name or IP)"
+    default ""
+
+config HCS_DEFAULT_SERVER_PORT
+    int "Fallback ingest UDP port"
+    range 1 65535
+    default 5566
+
+config HCS_DEFAULT_CHANNEL
+    int "Pinned 2.4 GHz channel (1-14)"
+    range 1 14
+    default 6
+    help
+      MUST match the dedicated AP's fixed channel. All nodes and the AP live
+      on this one channel at 20 MHz; see docs/architecture.md.
+
+config HCS_DEFAULT_SNTP_SERVER
+    string "SNTP server"
+    default "pool.ntp.org"
+
+endmenu
+
+menu "Capture and sounding"
+
+config HCS_SOUNDING_INTERVAL_MS
+    int "Broadcast sounding interval (ms)"
+    range 20 60000
+    default 100
+    help
+      Each node broadcasts one tiny sounding frame every interval, so every
+      other node on the channel gets a CSI sample of that link for free.
+      100 ms = 10 Hz per node: 9 nodes is ~90 tiny frames/s on the channel,
+      negligible airtime, and 10 samples/s per directional link is ample for
+      human motion (roughly 0.5-5 Hz Doppler).
+
+config HCS_SOUNDING_JITTER_PCT
+    int "Sounding schedule jitter (percent)"
+    range 0 90
+    default 25
+    help
+      Nodes flashed from the same image with the same interval would
+      otherwise lock into synchronised transmissions and collide forever.
+      Each interval is multiplied by a random factor in
+      [1 - pct/100, 1 + pct/100].
+
+config HCS_RSSI_FLOOR_DBM
+    int "Ignore captured frames weaker than this (dBm)"
+    range -100 0
+    default -85
+    help
+      Bounds the amount of unusable far-field noise that reaches the ring.
+
+config HCS_MAC_ALLOWLIST_ENFORCED
+    bool "Only keep CSI from allowlisted source MACs"
+    default n
+    help
+      When on, only frames whose source MAC is in the NVS allowlist (the
+      other nodes) or the associated AP produce records. Foreign household
+      traffic is dropped at the callback. Useful once the mesh is proven and
+      you want a clean, bounded stream.
+
+config HCS_CSI_MAX_LEN
+    int "Maximum raw CSI bytes kept per record"
+    range 64 1103
+    default 384
+    help
+      UNVERIFIED HARDWARE VALUE. The ESP32 reports CSI buffers whose length
+      depends on the decoded format; 384 covers LLTF+HT-LTF at 20 MHz
+      according to public documentation, but this project has not measured
+      it. Anything longer is dropped and counted (never truncated). Run
+      firmware/bringup/csi-hello and set this from the lengths it prints.
+
+config HCS_RING_SLOTS
+    int "CSI ring buffer slots"
+    range 8 512
+    default 64
+    help
+      RAM cost is roughly slots * (HCS_CSI_MAX_LEN + 32) bytes, statically
+      allocated. 64 * 416 = ~26 kB.
+
+endmenu
+
+menu "Uplink and budgets"
+
+config HCS_MAX_RECORDS_PER_BATCH
+    int "max_records_per_batch (docs/protocol.md S11)"
+    range 1 64
+    default 16
+
+config HCS_FLUSH_BUDGET_MS
+    int "flush_time_budget_ms (docs/protocol.md S11)"
+    range 10 10000
+    default 200
+
+config HCS_HEARTBEAT_INTERVAL_MS
+    int "Heartbeat interval (ms)"
+    range 1000 600000
+    default 15000
+
+config HCS_BW_SOUNDING_RPS
+    int "Sounding-derived records per second cap"
+    range 0 2000
+    default 50
+
+config HCS_BW_FOREIGN_RPS
+    int "Foreign-frame records per second cap (0 disables foreign capture)"
+    range 0 2000
+    default 5
+
+config HCS_BW_BYTES_PER_SEC
+    int "Overall record byte-rate cap (bytes/s, 0 = unlimited)"
+    range 0 1000000
+    default 32768
+
+config HCS_DECIMATE_FOREIGN_START_PCT
+    int "Ring occupancy at which foreign records start being thinned"
+    range 0 100
+    default 40
+
+config HCS_DECIMATE_SOUNDING_START_PCT
+    int "Ring occupancy at which sounding records start being thinned"
+    range 0 100
+    default 70
+
+config HCS_DECIMATE_FULL_PCT
+    int "Ring occupancy at which the maximum decimation divisor applies"
+    range 0 100
+    default 95
+
+config HCS_DECIMATE_MAX_DIVISOR
+    int "Maximum decimation divisor (1 disables decimation)"
+    range 1 64
+    default 8
+
+config HCS_RECONNECT_REBOOT_S
+    int "Reboot if Wi-Fi has been down this long (seconds, 0 = never)"
+    range 0 86400
+    default 900
+
+endmenu
+
+menu "Local debug mode"
+
+config HCS_DEBUG_UART
+    bool "Print a line per captured CSI record to UART"
+    default n
+    help
+      Field-debugging aid: makes a node observable with nothing but a serial
+      cable, no VPS involved. Costs UART time inside the uplink task (never
+      inside the CSI callback), so leave it off for real recording.
+
+config HCS_DEBUG_UDP
+    bool "Also mirror records to a plaintext UDP endpoint on the LAN"
+    default n
+    help
+      Sends the *unencrypted* batch plaintext to a host on the local
+      network so you can watch a node without the VPS chain. This is a
+      debugging backdoor around the confidentiality guarantee of
+      docs/protocol.md section 5 - never enable it on a deployed node.
+
+config HCS_DEBUG_UDP_HOST
+    string "Debug mirror host"
+    depends on HCS_DEBUG_UDP
+    default "192.168.1.2"
+
+config HCS_DEBUG_UDP_PORT
+    int "Debug mirror UDP port"
+    depends on HCS_DEBUG_UDP
+    range 1 65535
+    default 5556
+
+endmenu
+
+menu "Status LED"
+
+choice HCS_LED_BACKEND
+    prompt "Status LED backend"
+    default HCS_LED_BACKEND_NONE
+    help
+      THE HALOCODE'S LED HARDWARE IS UNVERIFIED BY THIS PROJECT. The board
+      is documented as having a 12-LED RGB ring, but neither the driver chip
+      nor the GPIO it hangs off has been confirmed here. The default backend
+      is therefore "none": the firmware logs its state instead of driving
+      anything, and every other subsystem works identically.
+
+      Once you have measured the real pin, pick a backend below.
+
+config HCS_LED_BACKEND_NONE
+    bool "None (log state transitions only)"
+
+config HCS_LED_BACKEND_GPIO
+    bool "Single plain GPIO (blink patterns)"
+
+config HCS_LED_BACKEND_WS2812
+    bool "WS2812-style addressable ring over RMT"
+
+endchoice
+
+config HCS_LED_GPIO
+    int "LED data GPIO"
+    depends on !HCS_LED_BACKEND_NONE
+    range 0 39
+    default 25
+    help
+      UNVERIFIED DEFAULT. 25 is a guess, not a datasheet reading. Confirm
+      with a scope or by trial before believing it.
+
+config HCS_LED_COUNT
+    int "Number of addressable LEDs"
+    depends on HCS_LED_BACKEND_WS2812
+    range 1 64
+    default 12
+
+config HCS_LED_MAX_BRIGHTNESS
+    int "Maximum per-channel brightness (0-255)"
+    depends on !HCS_LED_BACKEND_NONE
+    range 1 255
+    default 24
+    help
+      These nodes live in bedrooms and hallways. 24/255 is clearly visible
+      in a dark room without being a nightlight.
+
+endmenu
+
+endmenu

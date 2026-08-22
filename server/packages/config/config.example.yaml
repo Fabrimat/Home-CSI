@@ -1,0 +1,107 @@
+# Home CSI configuration example.
+#
+# Copy this file (e.g. to config.yaml), fill in real secrets, and point
+# HOMECSI_CONFIG_PATH / the `--config` CLI flag at it. Every key documented
+# here is validated by packages/config's zod schema (see src/schema.ts) —
+# an unknown or missing key is a startup error, not a silent default.
+#
+# Values below can be overridden at deploy time by a small set of
+# HOMECSI_* environment variables (see src/env.ts for the exact list);
+# secrets in particular should usually come from the environment rather
+# than being committed to a real config.yaml.
+
+server:
+  udp:
+    # Where the ingest process (brief B3) listens for node datagrams.
+    host: "0.0.0.0"
+    port: 5566
+  http:
+    # Where the API/UI server (brief B5) listens.
+    host: "0.0.0.0"
+    port: 8080
+  # Bearer token required by the API/UI (brief B5). Override via
+  # HOMECSI_SERVER_API_TOKEN in real deployments; do not commit a real
+  # token to version control.
+  apiToken: "change-me-to-a-long-random-token"
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  database: "homecsi"
+  user: "homecsi"
+  password: "change-me"
+  ssl: false
+  pool:
+    min: 1
+    max: 10
+
+# One entry per physical node. `id` matches the wire protocol's node_id
+# (docs/protocol.md section 3). `psk` is the 32-byte ChaCha20-Poly1305 key,
+# base64-encoded (docs/protocol.md section 5) — generate per node with e.g.
+# `openssl rand -base64 32`, never reuse across nodes.
+nodes:
+  - id: 1
+    name: "node-living-room"
+    room: "living-room"
+    psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    expectedMac: "aa:bb:cc:dd:ee:01"
+  - id: 2
+    name: "node-hallway"
+    room: "hallway"
+    psk: "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA="
+
+storage:
+  # Raw replay capture tree (docs/architecture.md "Data lifecycle").
+  captureDir: "../data/captures"
+  rotation:
+    # Roll to a new shard file after this many bytes...
+    maxBytes: 536870912 # 512 MiB
+    # ...or after this many milliseconds, whichever comes first.
+    maxIntervalMs: 3600000 # 1 hour
+  retention:
+    # Delete shards older than this...
+    maxAgeMs: 2592000000 # 30 days
+    # ...or once the capture tree exceeds this total size, oldest first.
+    maxTotalBytes: 107374182400 # 100 GiB
+  compression:
+    enabled: true
+    # Age (from shard close time) after which a shard becomes eligible for
+    # compression.
+    afterMs: 86400000 # 1 day
+
+features:
+  # Sliding window length and hop size for amplitude feature extraction.
+  windowMs: 2000
+  hopMs: 500
+  # "all" or an explicit list of subcarrier indices to use. Because CSI
+  # record layout is format-dependent (docs/protocol.md section 9.3), an
+  # explicit index list must be validated at runtime against each record's
+  # actual layout, not assumed fixed.
+  subcarrierSelection: "all"
+  # Exponential moving-average rate (0..1) for the amplitude baseline used
+  # to detect motion as a deviation from "normal".
+  baselineAdaptationRate: 0.02
+
+occupancy:
+  thresholds:
+    # Amplitude-deviation thresholds (in baseline-relative units) that
+    # count as "motion on" / "motion off" for the latched state machine
+    # (docs/architecture.md "Motion, not people").
+    motionOnThreshold: 3.0
+    motionOffThreshold: 1.5
+  # How long sustained no-motion (across all links) must persist before the
+  # latch decays from "occupied" back to "unoccupied".
+  latchDecayHorizonMs: 1800000 # 30 minutes
+  # Minimum time between latch transitions, to avoid rapid flapping.
+  hysteresisMs: 30000
+  multiOccupancy:
+    # How close in time simultaneous motion on spatially distinct links
+    # must be to count toward the 2+ stretch-goal estimate.
+    crossNodeSimultaneityThresholdMs: 5000
+
+logging:
+  level: "info"
+  file:
+    path: "../data/logs/homecsi.log"
+    maxFiles: 14
+    maxSizeMb: 50

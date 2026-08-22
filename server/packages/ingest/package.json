@@ -1,0 +1,19 @@
+{
+  "name": "@homecsi/ingest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@homecsi/config": "0.1.0",
+    "@homecsi/db": "0.1.0",
+    "@homecsi/protocol": "0.1.0",
+    "@homecsi/storage": "0.1.0",
+    "pino": "^9.4.0",
+    "pino-roll": "^4.0.0"
+  }
+}

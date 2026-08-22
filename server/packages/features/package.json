@@ -1,0 +1,17 @@
+{
+  "name": "@homecsi/features",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@homecsi/config": "0.1.0",
+    "@homecsi/db": "0.1.0",
+    "@homecsi/protocol": "0.1.0",
+    "pg": "^8.13.0"
+  }
+}

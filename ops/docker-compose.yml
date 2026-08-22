@@ -1,0 +1,208 @@
+# Home CSI — primary production deployment.
+#
+# Usage (from repo root):
+#   cd ops
+#   cp .env.example .env      # then fill in real values
+#   docker compose up -d
+#   docker compose exec migrate ... (one-shot, see `migrate` service below)
+#
+# Topology:
+#   Internet ---80/443---> caddy ---http---> api (internal only)
+#   Internet ---UDP--------------------------------> ingest (internal + published)
+#   timescaledb is reachable ONLY on the internal `homecsi` network - never published
+#   to the host, per the deployment's threat model (see docs/deployment.md).
+#
+# `migrate` is a one-shot job: it must complete successfully before `ingest`
+# and `api` start, so their `depends_on` uses `service_completed_successfully`
+# (not just "started") to avoid a race against an empty/half-migrated schema.
+
+x-app-env: &app-env
+  NODE_ENV: production
+  # ASSUMPTION (server config surface not yet finalized by sibling brief B1/B3 at
+  # the time this file was written): the CLI reads Postgres connection details and
+  # the HTTP/UDP ports from these HOMECSI_* environment variables, overriding the
+  # YAML config's defaults. If the real config schema uses different variable
+  # names, update this anchor accordingly - the docker-compose topology itself
+  # (service names, dependency order, port publication) does not depend on the
+  # exact variable names.
+  HOMECSI_DB_HOST: timescaledb
+  HOMECSI_DB_PORT: "5432"
+  HOMECSI_DB_NAME: ${POSTGRES_DB}
+  HOMECSI_DB_USER: ${POSTGRES_USER}
+  HOMECSI_DB_PASSWORD: ${POSTGRES_PASSWORD}
+  HOMECSI_UDP_PORT: ${HOMECSI_UDP_PORT:-5566}
+  HOMECSI_HTTP_PORT: "8080"
+  HOMECSI_API_TOKEN: ${HOMECSI_API_TOKEN}
+  HOMECSI_DATA_DIR: /data
+  HOMECSI_LOG_LEVEL: ${HOMECSI_LOG_LEVEL:-info}
+
+x-logging: &default-logging
+  # Docker log driver limits so a runaway/chatty container cannot fill the
+  # host disk via its own captured stdout/stderr. This is independent of, and
+  # in addition to, the application-level log rotation described in
+  # docs/deployment.md (which covers files the app writes into /data/logs).
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  timescaledb:
+    # Pinned tag (never `latest`): TimescaleDB 2.17.x on Postgres 16.
+    # Check the release notes before bumping this - a major Postgres version
+    # bump needs pg_upgrade or a dump/restore, not just a tag change.
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command:
+      - postgres
+      # --- Postgres tuning for a modest VPS (assume ~2-4 vCPU / 4-8 GB RAM)
+      # running a write-heavy, mostly-append time-series workload. These are
+      # deliberately conservative so the DB does not starve the ingest/api
+      # containers sharing the same host; revisit if the VPS is bigger. ---
+      - -c
+      - shared_buffers=512MB
+      # shared_buffers: Postgres's own page cache. ~25% of a small VPS's RAM
+      # is the usual starting rule of thumb; kept modest to leave room for
+      # the OS page cache and sibling containers.
+      - -c
+      - effective_cache_size=1536MB
+      # effective_cache_size: a hint to the planner about total memory
+      # (Postgres + OS cache) available for caching; does not itself
+      # allocate memory. Helps the planner favor index scans appropriately.
+      - -c
+      - work_mem=16MB
+      # work_mem: per-sort/hash-operation memory. Kept small because many
+      # concurrent small queries (ingest writes + debug API reads) can each
+      # grab this much; too high risks OOM under concurrency.
+      - -c
+      - maintenance_work_mem=128MB
+      # maintenance_work_mem: used by VACUUM, index builds, and TimescaleDB
+      # compression/retention jobs (owned by sibling brief B3's enforcement
+      # code) - a bit higher than work_mem since these run less concurrently.
+      - -c
+      - max_wal_size=2GB
+      # max_wal_size: bounds WAL growth between checkpoints. Higher values
+      # reduce checkpoint frequency (better write throughput for a
+      # continuous-ingest workload) at the cost of more disk used by WAL and
+      # a longer crash-recovery replay.
+      - -c
+      - checkpoint_completion_target=0.9
+      # checkpoint_completion_target: spreads checkpoint I/O over most of
+      # the checkpoint interval instead of bursting it, smoothing write
+      # latency for concurrent ingest.
+      - -c
+      - synchronous_commit=off
+      # synchronous_commit=off: the DB acknowledges a commit before its WAL
+      # record is guaranteed flushed to disk. Trades "lose at most the last
+      # ~200ms of committed CSI batches on a hard crash" for meaningfully
+      # better write throughput - an acceptable trade for telemetry data
+      # that is regenerable-ish (see docs/deployment.md backup section);
+      # do NOT use this setting for data you cannot afford to ever lose.
+      - -c
+      - random_page_cost=1.1
+      # random_page_cost=1.1: tells the planner storage is SSD-like (most
+      # VPS block storage is), so it doesn't over-penalize index scans the
+      # way the historical spinning-disk default (4.0) would.
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Intentionally NOT published to the host - reachable only on the
+    # internal `homecsi` compose network. See ops/docker-compose.override.example.yml
+    # for a local-dev variant that publishes it to 127.0.0.1 for inspection.
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    command: ["node", "packages/cli/dist/cli.js", "migrate"]
+    environment: *app-env
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  ingest:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    command: ["node", "packages/cli/dist/cli.js", "ingest"]
+    restart: unless-stopped
+    environment: *app-env
+    ports:
+      # UDP - this is the world-reachable CSI ingest port. See
+      # ops/hardening/harden.sh and docs/deployment.md for why an
+      # unauthenticated-looking public UDP port is an acceptable exposure
+      # here (every datagram is AEAD-authenticated per docs/protocol.md).
+      - "${HOMECSI_UDP_PORT:-5566}:${HOMECSI_UDP_PORT:-5566}/udp"
+    volumes:
+      - ${HOMECSI_DATA_DIR}:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  api:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    command: ["node", "packages/cli/dist/cli.js", "serve"]
+    restart: unless-stopped
+    environment: *app-env
+    volumes:
+      - ${HOMECSI_DATA_DIR}:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # No `ports:` here on purpose - the debug API/UI is only reached through
+    # caddy's TLS reverse proxy on the `homecsi` network, never directly.
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      HOMECSI_DOMAIN: ${HOMECSI_DOMAIN}
+      HOMECSI_ACME_EMAIL: ${HOMECSI_ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    networks:
+      - homecsi
+    logging: *default-logging
+
+networks:
+  homecsi:
+    driver: bridge
+
+volumes:
+  timescaledb_data:
+  caddy_data:
+  caddy_config:

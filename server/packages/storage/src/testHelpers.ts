@@ -1,0 +1,58 @@
+import type { Config } from '@homecsi/config';
+
+export interface TestNodeSpec {
+  id: number;
+  name?: string;
+  room?: string;
+  psk?: string;
+  expectedMac?: string;
+}
+
+/** Builds a minimal, schema-shaped `Config` for tests without touching `@homecsi/config`'s zod parsing. */
+export function makeTestConfig(nodes: TestNodeSpec[]): Config {
+  return {
+    server: {
+      udp: { host: '127.0.0.1', port: 0 },
+      http: { host: '127.0.0.1', port: 0 },
+      apiToken: 'x'.repeat(16),
+    },
+    database: {
+      host: '127.0.0.1',
+      port: 5432,
+      database: 'homecsi_test',
+      user: 'homecsi',
+      password: 'x',
+      ssl: false,
+      pool: { min: 1, max: 5 },
+    },
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      name: n.name ?? `node-${n.id}`,
+      room: n.room ?? 'test-room',
+      psk: n.psk ?? Buffer.alloc(32, n.id).toString('base64'),
+      expectedMac: n.expectedMac,
+    })),
+    storage: {
+      captureDir: 'unused-default',
+      rotation: { maxBytes: 1_000_000, maxIntervalMs: 3_600_000 },
+      retention: { maxAgeMs: 2_592_000_000, maxTotalBytes: 107_374_182_400 },
+      compression: { enabled: true, afterMs: 86_400_000 },
+    },
+    features: {
+      windowMs: 2000,
+      hopMs: 500,
+      subcarrierSelection: 'all',
+      baselineAdaptationRate: 0.02,
+    },
+    occupancy: {
+      thresholds: { motionOnThreshold: 3, motionOffThreshold: 1.5 },
+      latchDecayHorizonMs: 1_800_000,
+      hysteresisMs: 30_000,
+      multiOccupancy: { crossNodeSimultaneityThresholdMs: 5000 },
+    },
+    logging: {
+      level: 'error',
+      file: { path: 'unused.log', maxFiles: 1, maxSizeMb: 1 },
+    },
+  };
+}

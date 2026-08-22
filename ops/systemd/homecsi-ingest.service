@@ -1,0 +1,40 @@
+[Unit]
+Description=Home CSI - ingest (UDP CSI datagram receiver)
+Documentation=https://github.com/ (see docs/deployment.md in the repo)
+After=network-online.target postgresql.service
+Wants=network-online.target
+# If Postgres runs on the same host as a systemd service (not Docker) rather
+# than in the Docker stack, uncomment the line below and adjust the unit
+# name to match your Postgres/TimescaleDB systemd service.
+# Requires=postgresql.service
+
+[Service]
+Type=simple
+User=homecsi
+Group=homecsi
+WorkingDirectory=/opt/homecsi/server
+EnvironmentFile=/etc/homecsi/homecsi.env
+ExecStart=/usr/bin/node packages/cli/dist/cli.js ingest
+
+Restart=on-failure
+RestartSec=5
+
+# journald log limits so the systemd journal cannot grow unbounded from a
+# noisy or crash-looping service. This mirrors the intent of the
+# `logging:` limits set on the Docker path (see ops/docker-compose.yml) -
+# see ops/systemd/README.md for the matching journald.conf.d snippet, which
+# applies globally rather than per-unit.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homecsi-ingest
+
+# Hardening (defense in depth; adjust ReadWritePaths to match
+# HOMECSI_DATA_DIR in /etc/homecsi/homecsi.env).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/homecsi/data
+
+[Install]
+WantedBy=multi-user.target

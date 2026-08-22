@@ -1,0 +1,40 @@
+# Sidecar ignore file for ops/Dockerfile.
+#
+# BuildKit convention: a file named `<dockerfile-filename>.dockerignore`
+# placed next to a Dockerfile overrides the root `.dockerignore` for builds
+# using that Dockerfile. Because ops/docker-compose.yml sets
+# `build.context: ..` (repo root) and `build.dockerfile: ops/Dockerfile`,
+# this file - not a root-level .dockerignore - is what controls what reaches
+# the build context for this image.
+#
+# DO NOT add any pattern here that excludes `server/` or its subpaths. The
+# Dockerfile COPYs from server/ (package.json, package-lock.json,
+# server/packages/*, and the full server/. tree in the build stage) - doing
+# so would silently produce an empty or broken image with no clear error.
+
+# Version control and repo metadata - not needed inside the image.
+.git
+.gitignore
+.gitattributes
+
+# Docs and non-server top-level content - irrelevant to the Node build.
+README.md
+docs
+firmware
+ops
+data
+
+# Local build artifacts / dependency caches on the host. These are always
+# regenerated inside the image by `npm ci` / `npm run build`, so shipping
+# host copies would only bloat the build context and risk stale artifacts
+# leaking into a stage that expects a clean install.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/coverage
+
+# Editor / OS cruft.
+**/.vscode
+**/.idea
+**/.DS_Store
+**/Thumbs.db

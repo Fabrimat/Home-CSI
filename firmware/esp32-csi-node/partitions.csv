@@ -1,0 +1,28 @@
+# Home CSI node partition table.
+#
+# FLASH SIZE ASSUMPTION -- READ THIS BEFORE FLASHING
+# ---------------------------------------------------
+# The flash size of the Makeblock Halocode module has NOT been verified by
+# this project. Run `esptool.py flash_id` (see firmware/bringup/README.md)
+# and record the real value in the bring-up table before trusting anything
+# here.
+#
+# This table is deliberately sized to fit in **2 MB**, the smallest flash
+# any plausible ESP32 module ships with, so it works on a 2 MB part and is
+# simply under-using a 4 MB one. Nothing else in the firmware assumes a
+# flash size.
+#
+#   0x000000-0x008000  bootloader + partition table (implicit)
+#   0x009000  nvs       24 KB   per-node identity, PSK, settings, boot epoch
+#   0x00f000  phy_init   4 KB   RF calibration data
+#   0x010000  factory  1536 KB  the application
+#   ----------------------------------------- total 0x190000 = 1.5625 MB
+#
+# There is no OTA partition in v1 (no OTA in v1; see docs/roadmap.md). To add
+# OTA later on a confirmed 4 MB part, replace `factory` with ota_0/ota_1 plus
+# an `otadata` partition -- that is the only change needed here.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x180000,
