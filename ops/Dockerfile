@@ -28,9 +28,13 @@
 #     workspaces root, with member packages under server/packages/*.
 #   - A root `npm run build` script builds every workspace (e.g. via
 #     `--workspaces` or TS project references) into each package's dist/.
-#   - The CLI entry point is server/packages/cli/dist/cli.js, invoked as
-#     `node packages/cli/dist/cli.js <subcommand>` (per-service `command:`
-#     overrides in ops/docker-compose.yml supply the subcommand).
+#   - The CLI entry point is server/packages/cli/dist/index.js. It is baked
+#     into the exec-form ENTRYPOINT below, so a per-service `command:` in
+#     ops/docker-compose.yml (and any `docker compose run` argument) must be
+#     the BARE SUBCOMMAND only - e.g. `["serve"]`, not
+#     `["node", "packages/cli/dist/index.js", "serve"]`. A compose `command:`
+#     is appended to an exec-form ENTRYPOINT, never substituted for it, so
+#     repeating the interpreter yields a doubled argv the CLI rejects.
 # If the real layout differs, update the COPY paths and the ENTRYPOINT below
 # accordingly - the surrounding stage structure (deps -> build -> prod-deps
 # -> runtime) should still apply.
@@ -82,7 +86,7 @@ VOLUME ["/data"]
 # HOMECSI_* env vars and actually published per-service in
 # ops/docker-compose.yml, not baked into the image.
 
-ENTRYPOINT ["node", "packages/cli/dist/cli.js"]
+ENTRYPOINT ["node", "packages/cli/dist/index.js"]
 # Default subcommand if none given; every service in docker-compose.yml
 # overrides this via `command:`.
 CMD ["doctor"]

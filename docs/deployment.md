@@ -16,11 +16,75 @@ SSH into the VPS; editing `.env` and writing docs can happen locally.
 
 ## 1. Provision the VPS
 
-1. Rent a small VPS (a single 2 vCPU / 4 GB RAM instance is enough to start
-   at 4 nodes / ~110 kbps; re-evaluate before scaling to 9 nodes / ~600
-   kbps — see "Upgrades" below). Debian 12 or Ubuntu 22.04+ recommended.
+1. Rent a small VPS. Debian 12 or Ubuntu 22.04+ recommended. See "VPS
+   Sizing" below for recommendations based on your node count.
 2. Note its public IPv4 (and IPv6 if you have it) address.
 3. Confirm you can SSH in with a key before doing anything else.
+
+### VPS Sizing
+
+The ingest capacity (CSI records and heartbeats written per second) scales
+with node count. Here are the measured per-node rates and derived disk
+requirements:
+
+**Ingest rates** (based on `csi_format = LLTF` ~128 B CSI per record; 7
+records per UDP datagram; 10 Hz sounding rate per node):
+
+| | 4 nodes | 9 nodes |
+|---|---|---|
+| Records/s per node | 30 (3 peers × 10 Hz) | 50 (capped; peers would give 80) |
+| Records/s total | 120 | 450 |
+| Rows/day (`csi_records` table) | 10.4 M | 38.9 M |
+| Inbound bandwidth | 166 kbps | 621 kbps |
+| Monthly transfer | 54 GB | 201 GB |
+
+**Disk requirements** (with a 7-day debug/development retention window for
+raw CSI, capture files, and extracted features):
+
+- **4 nodes:** 11.1 GB `csi_records` + 9.1 GB captures + 1.6 GB `features` =
+  21.8 GB data; +~15 GB for OS/Docker/logs; stay under 70% disk fill →
+  **60 GB disk**.
+- **9 nodes:** 41.8 GB `csi_records` + 34.0 GB captures + 9.3 GB `features`
+  = 85.1 GB data; +~15 GB → **160 GB disk**.
+- **Reference for other retention windows:** 3-day window (4 nodes → 40 GB
+  disk, 9 nodes → 100 GB disk); 14-day window (4 nodes → 80 GB disk, 9
+  nodes → 260 GB disk).
+
+**Recommendation: Start with 80 GB disk.** This covers 4 nodes at a 14-day
+debug window, or 9 nodes at 3-4 days. The retention window is a config
+parameter (not a migration), so it can be traded against disk later.
+
+**Other hardware requirements:**
+
+- **Storage:** NVMe/SSD, not spinning disk. The workload is continuous
+  inserts across three indexes plus TimescaleDB compression jobs. CPU is
+  nearly idle by comparison (ingest does only ~17-64 AEAD opens/s); disk
+  I/O is the limiting factor.
+- **RAM:** At 9 nodes, **8 GB RAM is a requirement, not headroom.** The
+  `chunk_time_interval` on `csi_records` is 1 hour (migration 002), so each
+  hot chunk is ~570 MB. TimescaleDB works best when the active chunk fits
+  within ~25% of RAM; with only 4 GB you exceed that and compression
+  performance degrades. The only way to stay at 4 GB is to reduce
+  `chunk_time_interval` to 30 minutes, which increases compression overhead
+  and competes with ingest for I/O. Not recommended for 9 nodes — 8 GB is
+  the practical minimum.
+- **Swap:** 2 GB, even with ample RAM. Compression jobs are bursty and
+  OOM-killing Postgres mid-compression is unpleasant; swap is cheap
+  insurance.
+- **Bandwidth quota:** ≥ 1 TB/month. At 9 nodes, 201 GB/month is 24×
+  typical, but quota should comfortably cover peaks.
+- **Disk fill:** Never plan above 70% full. Postgres needs free space for
+  compression jobs, VACUUM, and `pg_dump`; filling beyond that risks
+  operational incidents.
+
+**One operational consequence worth noting:** occupancy state machine
+output is kept indefinitely (costs ~3 MB/year at ~30 transitions/day), but
+the raw CSI features that feed it have a 7-day retention window. If the
+occupancy pipeline (brief B4) is down for more than 7 days, those features
+age out unprocessed and leave a **permanent gap in the occupancy log** — a
+span of time where no occupancy state was computed. Recovery after a long
+outage requires manual backfill or re-running the pipeline against
+replayed captures (if they're still on disk).
 
 ## 2. Harden the VPS
 
@@ -231,9 +295,9 @@ Three layers keep the disk from filling, in order of what enforces them:
 3. **A total disk budget** — decide up front how much of the VPS's disk
    Home CSI is allowed to use (e.g. "80% of the volume, leaving headroom for
    OS/Docker/logs"), and size the retention window and capture rotation
-   policy to fit under it given your node count's write rate (~110 kbps at
-   4 nodes, ~600 kbps at 9 — multiply by seconds-per-day and your retention
-   window in days to estimate raw ingest volume before compression).
+   policy to fit under it. See "VPS Sizing" above for your node count's
+   measured ingest bandwidth and computed disk requirements; use those figures
+   to estimate raw ingest volume before compression.
 
 **Checking current usage:**
 
@@ -250,6 +314,55 @@ documented, tighten or loosen the retention window based on the `df -h`
 trend over the first few weeks of real traffic rather than guessing up
 front — actual CSI record size in practice will vary by how much motion
 (and therefore how many `CSI_BATCH` records) the deployment actually sees.
+
+## Scheduling the training-set preservation sweep
+
+`features` (and `csi_records`) are retained for only a **7-day debug
+window** (migration 007, see `docs/architecture.md` "Data lifecycle").
+Labelled sessions' raw per-link feature rows are copied out into
+`training_features` before that happens — but that copy only runs when a
+label session is actually stopped (from either the CLI or the web UI stop
+button). **Nothing runs it on a schedule by default** — there is no cron
+job, systemd timer, or Docker service configured for this out of the box,
+so an operator who never explicitly schedules it is relying entirely on
+every session being stopped cleanly through one of those two paths (see
+`docs/architecture.md`'s "Both stop paths trigger preservation,
+independently" for what each path does and does not guarantee on failure).
+
+**Schedule `homecsi label preserve` to run periodically** (daily is
+reasonable, comfortably inside the 7-day window) as the backstop for:
+sessions left open with no stop call at all, a stop whose preservation
+attempt failed (CLI non-zero exit, or a web UI response carrying
+`preservationWarning`), and simply as defense in depth. Re-running it
+against sessions it already preserved is a safe, cheap no-op — including
+for sessions old enough that their `features` rows have since legitimately
+aged out (see `docs/architecture.md`'s data-lifecycle note on why the
+sweep does not alarm forever on those).
+
+- **Docker path:** run it via the same image the `api`/`ingest` services
+  already use, against the running stack's network/config, without
+  starting a duplicate long-running server:
+
+  ```sh
+  # crontab -e (as a user with access to `docker compose` in ops/):
+  # Pass the bare subcommand: the image's ENTRYPOINT already runs the CLI,
+  # and `docker compose run` arguments are appended to it, not substituted.
+  0 3 * * * cd /opt/homecsi/repo/ops && docker compose run --rm api label preserve >> /var/log/homecsi-label-preserve.log 2>&1
+  ```
+
+- **systemd path:** install `ops/systemd/homecsi-label-preserve.service`
+  and `.timer` (daily by default — see the timer file's `OnCalendar`) the
+  same way as the other units in `ops/systemd/README.md`:
+
+  ```sh
+  sudo cp ops/systemd/homecsi-label-preserve.service ops/systemd/homecsi-label-preserve.timer /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now homecsi-label-preserve.timer
+  ```
+
+Either way, treat a non-zero exit / non-empty error output from this sweep
+as an actionable alert, not routine noise — after this fix, a healthy
+deployment's sweep is expected to exit cleanly every time it runs.
 
 ## Log management
 

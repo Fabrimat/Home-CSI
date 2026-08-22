@@ -1,0 +1,32 @@
+[Unit]
+Description=Home CSI - label preserve (training-set preservation sweep, one-shot)
+Documentation=https://github.com/ (see docs/deployment.md "Scheduling the training-set preservation sweep")
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Requires=postgresql.service
+
+# Triggered by homecsi-label-preserve.timer -- not enabled/started directly.
+# `label preserve` (docs/architecture.md "Data lifecycle") copies labelled
+# sessions' raw per-link features into `training_features` before the 7-day
+# `features` retention window (migration 007) drops them -- the backstop for
+# sessions left open, or whose session-close preservation attempt failed
+# (CLI or web UI stop path). Safe to run standing: re-attempting an
+# already-preserved session, however old, is a no-op, not an error.
+
+[Service]
+Type=oneshot
+User=homecsi
+Group=homecsi
+WorkingDirectory=/opt/homecsi/server
+EnvironmentFile=/etc/homecsi/homecsi.env
+ExecStart=/usr/bin/node packages/cli/dist/index.js label preserve
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homecsi-label-preserve
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/homecsi/data

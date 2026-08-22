@@ -14,7 +14,7 @@ User=homecsi
 Group=homecsi
 WorkingDirectory=/opt/homecsi/server
 EnvironmentFile=/etc/homecsi/homecsi.env
-ExecStart=/usr/bin/node packages/cli/dist/cli.js ingest
+ExecStart=/usr/bin/node packages/cli/dist/index.js ingest
 
 Restart=on-failure
 RestartSec=5

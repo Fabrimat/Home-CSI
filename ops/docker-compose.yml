@@ -127,7 +127,12 @@ services:
       context: ..
       dockerfile: ops/Dockerfile
     image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
-    command: ["node", "packages/cli/dist/cli.js", "migrate"]
+    # Just the subcommand: the image's exec-form ENTRYPOINT already supplies
+    # `node packages/cli/dist/index.js`, and a compose `command:` is APPENDED
+    # to an exec-form ENTRYPOINT rather than replacing it. Repeating the
+    # interpreter here would produce `node ... index.js node ... index.js
+    # migrate`, and commander would reject `node` as an unknown subcommand.
+    command: ["migrate"]
     environment: *app-env
     depends_on:
       timescaledb:
@@ -142,7 +147,7 @@ services:
       context: ..
       dockerfile: ops/Dockerfile
     image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
-    command: ["node", "packages/cli/dist/cli.js", "ingest"]
+    command: ["ingest"] # subcommand only - see the migrate service above
     restart: unless-stopped
     environment: *app-env
     ports:
@@ -165,7 +170,7 @@ services:
       context: ..
       dockerfile: ops/Dockerfile
     image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
-    command: ["node", "packages/cli/dist/cli.js", "serve"]
+    command: ["serve"] # subcommand only - see the migrate service above
     restart: unless-stopped
     environment: *app-env
     volumes:

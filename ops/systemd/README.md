@@ -9,7 +9,7 @@ container if you want Docker for just that piece) — these unit files only
 cover the `ingest` and `api` (serve) processes, matching the `ingest` and
 `api` services in the Docker compose path.
 
-Migrations (`node packages/cli/dist/cli.js migrate`) are a one-shot command
+Migrations (`node packages/cli/dist/index.js migrate`) are a one-shot command
 in this path too — run it manually (or from a deploy script) after each
 build/upgrade, before (re)starting the `homecsi-ingest`/`homecsi-api`
 services. There is no unit file for it because "run once, then exit
@@ -75,6 +75,23 @@ deploy procedure (see `docs/deployment.md`).
    sudo cp ops/systemd/homecsi-ingest.service ops/systemd/homecsi-api.service /etc/systemd/system/
    sudo systemctl daemon-reload
    sudo systemctl enable --now homecsi-ingest homecsi-api
+   ```
+
+5. **Install and enable the training-set preservation timer.** Unlike
+   `ingest`/`api`, this one is a one-shot (`Type=oneshot`) unit driven by a
+   companion `.timer`, not a long-running service — enable the `.timer`,
+   not the `.service`, so it runs on the schedule instead of once at boot.
+   See `docs/deployment.md` "Scheduling the training-set preservation
+   sweep" for why this needs to be scheduled at all:
+
+   ```sh
+   sudo cp ops/systemd/homecsi-label-preserve.service ops/systemd/homecsi-label-preserve.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now homecsi-label-preserve.timer
+   # Verify it's scheduled, and run it once by hand to confirm it exits clean:
+   systemctl list-timers homecsi-label-preserve.timer
+   sudo systemctl start homecsi-label-preserve.service
+   journalctl -u homecsi-label-preserve.service -n 50
    ```
 
 ## Restart policy

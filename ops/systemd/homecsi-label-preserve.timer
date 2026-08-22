@@ -1,0 +1,15 @@
+[Unit]
+Description=Home CSI - run label preserve daily (see homecsi-label-preserve.service)
+
+[Timer]
+# Daily is comfortably inside the 7-day features retention window
+# (migration 007) -- tune if your deployment's session volume warrants
+# tighter/looser scheduling. Persistent=true catches up on a missed run
+# (e.g. the host was off) rather than silently skipping it until the next
+# scheduled time.
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
