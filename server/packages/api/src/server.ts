@@ -2,13 +2,15 @@ import { existsSync } from 'node:fs';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
+import { DEFAULT_RETENTION_SAFETY_MARGIN_MS } from '@homecsi/labeling';
 import { extractBearerToken, tokensMatch } from './auth.js';
 import type { HomeCsiDb } from './db/types.js';
 import { LiveHub } from './live/hub.js';
 import { registerCsiRoutes } from './routes/csi.js';
+import { DEFAULT_RETENTION_MAX_AGE_MS, registerConfigRoutes, type ClientConfig } from './routes/config.js';
 import { registerFeatureRoutes } from './routes/features.js';
 import { registerHealthRoutes } from './routes/health.js';
-import { registerLabelRoutes } from './routes/labels.js';
+import { registerLabelRoutes, type LabelPreservationDeps } from './routes/labels.js';
 import { registerLinkRoutes } from './routes/links.js';
 import { registerLogRoutes } from './routes/logs.js';
 import { registerNodeRoutes } from './routes/nodes.js';
@@ -25,6 +27,24 @@ export interface BuildAppOptions {
   logger?: FastifyBaseLogger | boolean;
   /** Backs `/api/logs`. Defaults to an empty, unused buffer for tests that don't care about log tailing. */
   ringBuffer?: RingLogBuffer;
+  /**
+   * Training-set preservation deps for the labels session-stop route (see
+   * routes/labels.ts). Omitted by tests that don't need it and by any
+   * caller without a live database; `startServer` always supplies it in
+   * production so the web UI's stop button preserves features the same way
+   * the CLI's `label session stop` does (docs/architecture.md "Data lifecycle").
+   */
+  labelPreservation?: LabelPreservationDeps;
+  /**
+   * Client-relevant slice of config backing `GET /api/config` (see
+   * routes/config.ts) -- lets the dashboard shade timeline selections that
+   * are already past the point of no return for training-set preservation.
+   * Optional and defaulted (DEFAULT_RETENTION_MAX_AGE_MS/
+   * DEFAULT_RETENTION_SAFETY_MARGIN_MS) so tests that don't care about this
+   * route don't need to learn about it; `startServer` always supplies the
+   * real values from `config.storage.retention`.
+   */
+  clientConfig?: ClientConfig;
 }
 
 /**
@@ -63,7 +83,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerCsiRoutes(app, options.db);
   registerFeatureRoutes(app, options.db);
   registerOccupancyRoutes(app, options.db);
-  registerLabelRoutes(app, options.db);
+  registerLabelRoutes(app, options.db, options.labelPreservation);
+  registerConfigRoutes(
+    app,
+    options.clientConfig ?? {
+      retentionMaxAgeMs: DEFAULT_RETENTION_MAX_AGE_MS,
+      retentionSafetyMarginMs: DEFAULT_RETENTION_SAFETY_MARGIN_MS,
+    },
+  );
   registerLogRoutes(app, options.ringBuffer ?? new RingLogBuffer(1));
 
   return app;

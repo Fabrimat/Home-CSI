@@ -237,6 +237,60 @@ th {
   border-color: var(--accent);
 }
 
+.controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: var(--border);
+}
+
+/* "Confirm correct" is a primary action (docs/roadmap.md: confirmations are
+   as valuable as corrections), not a visually secondary one -- it gets the
+   same prominence treatment as a live/ok badge, not the default button chrome. */
+.controls button.btn-confirm {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #001018;
+  font-weight: 600;
+}
+
+.controls button.btn-confirm:hover:not(:disabled) {
+  border-color: var(--text);
+}
+
+.controls button.btn-confirm:disabled {
+  background: var(--bg-panel-raised);
+  color: var(--text-dim);
+}
+
+/* Feedback for a submitted correction. Deliberately three distinct
+   variants -- a preservationWarning must never be styled the same as a
+   plain success message (docs/roadmap.md: "surface the preservation
+   warning prominently"). */
+.correction-message {
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.correction-message.ok {
+  border: 1px solid var(--ok);
+  color: var(--ok);
+  background: rgba(61, 220, 151, 0.08);
+}
+
+.correction-message.warn {
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  background: rgba(245, 196, 81, 0.08);
+}
+
+.correction-message.error {
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  background: rgba(245, 97, 92, 0.08);
+}
+
 .controls button:focus-visible,
 nav.tabs a:focus-visible,
 select:focus-visible,

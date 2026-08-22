@@ -59,10 +59,17 @@ storage:
     # ...or after this many milliseconds, whichever comes first.
     maxIntervalMs: 3600000 # 1 hour
   retention:
-    # Delete shards older than this...
-    maxAgeMs: 2592000000 # 30 days
+    # Delete shards older than this. Aligned to the agreed 7-day debug
+    # window (docs/architecture.md "Data lifecycle") -- the raw capture
+    # tree is the disaster-recovery/replay path, not long-term storage;
+    # anything worth keeping past this window belongs in a deliberately
+    # preserved dataset instead (see @homecsi/labeling's training-set
+    # preservation for the DB-side equivalent).
+    maxAgeMs: 604800000 # 7 days
     # ...or once the capture tree exceeds this total size, oldest first.
-    maxTotalBytes: 107374182400 # 100 GiB
+    # Sized to fit comfortably on an ~80 GB VPS disk alongside the
+    # database and everything else on the box.
+    maxTotalBytes: 32212254720 # 30 GiB
   compression:
     enabled: true
     # Age (from shard close time) after which a shard becomes eligible for
@@ -105,3 +112,23 @@ logging:
     path: "../data/logs/homecsi.log"
     maxFiles: 14
     maxSizeMb: 50
+
+# Optional. Tunes the training-set preservation safety check
+# (@homecsi/labeling, docs/architecture.md "Data lifecycle") that runs
+# before a manual label session's raw per-link features are copied into
+# `training_features`. Omit this whole section to use the built-in
+# defaults (1 hour / 0.5) -- unlike every section above, an unknown or
+# missing key here is NOT a startup error, since this knob was added after
+# @homecsi/labeling already had safe fallback constants for it.
+training:
+  preservation:
+    # Recent "known-alive" window used as this deployment's live
+    # feature-row density baseline; a preserved window's own density is
+    # compared against it rather than against an assumed link count --
+    # not every node necessarily hears every other node (multi-room
+    # attenuation), so a fixed topology-based expectation would false-alarm
+    # on a perfectly healthy, partial mesh.
+    baselineWindowMs: 3600000 # 1 hour
+    # Minimum fraction of that baseline's density a window must retain to
+    # be treated as healthy. Set to 0 to disable the check entirely.
+    minDensityFraction: 0.5

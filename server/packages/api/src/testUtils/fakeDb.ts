@@ -10,6 +10,7 @@ import type {
   OccupancyRow,
   StatusSummary,
   TimeRange,
+  UpdateLabelEndTimeResult,
 } from '../db/types.js';
 
 /**
@@ -121,14 +122,29 @@ export class FakeHomeCsiDb implements HomeCsiDb {
       .slice(0, params.maxPoints);
   }
 
+  /**
+   * Mirrors PgHomeCsiDb: in-window events (newest kept when trimmed by
+   * `limit`) plus the carry-in event at or before `from`, at its real
+   * timestamp. Route tests depend on this matching the real implementation's
+   * step semantics, not on it being the simplest possible filter.
+   */
   async listOccupancyStates(params: TimeRange & { limit: number }): Promise<OccupancyRow[]> {
-    return this.occupancyStates
+    const sorted = [...this.occupancyStates].sort((a, b) => a.time.localeCompare(b.time));
+    const inWindow = sorted
       .filter((o) => new Date(o.time) >= params.from && new Date(o.time) < params.to)
-      .slice(0, params.limit);
+      .slice(-params.limit);
+    const carryIn = sorted.filter((o) => new Date(o.time) <= params.from).at(-1);
+    const rows = carryIn && !inWindow.includes(carryIn) ? [carryIn, ...inWindow] : inWindow;
+    if (rows.length <= params.limit) return rows;
+    return [rows[0] as OccupancyRow, ...rows.slice(rows.length - (params.limit - 1))];
   }
 
   async pollOccupancyStates(params: { since: Date; limit: number }): Promise<OccupancyRow[]> {
     return this.occupancyStates.filter((o) => new Date(o.time) > params.since).slice(0, params.limit);
+  }
+
+  async getLatestOccupancyState(): Promise<OccupancyRow | null> {
+    return [...this.occupancyStates].sort((a, b) => a.time.localeCompare(b.time)).at(-1) ?? null;
   }
 
   async getStatusSummary(windowMs: number): Promise<StatusSummary> {
@@ -169,20 +185,55 @@ export class FakeHomeCsiDb implements HomeCsiDb {
     return this.labels.filter((l) => l.sessionId === params.sessionId).slice(0, params.limit);
   }
 
+  /**
+   * Mirrors PgHomeCsiDb.listLabelsInRange's overlap predicate exactly --
+   * including the asymmetric boundary rule for `end_time`'s exclusivity
+   * (see that method's own comment): a point label is included when its
+   * `time` falls anywhere in [from, to) (`>= from`), but a real interval
+   * only overlaps if its `end_time` is strictly after `from` (`> from`) --
+   * an interval that ends exactly at `from` has already excluded that
+   * instant. Route tests depend on this matching exactly, not on it being
+   * the simplest possible filter.
+   */
+  async listLabelsInRange(params: TimeRange & { limit: number }): Promise<LabelRow[]> {
+    return [...this.labels]
+      .filter((l) => {
+        const start = new Date(l.time).getTime();
+        const startsOverlap =
+          l.endTime === null ? start >= params.from.getTime() : new Date(l.endTime).getTime() > params.from.getTime();
+        return start < params.to.getTime() && startsOverlap;
+      })
+      .sort((a, b) => a.time.localeCompare(b.time))
+      .slice(0, params.limit);
+  }
+
   async createLabel(params: {
     sessionId: number;
     time: Date;
+    endTime?: Date;
     occupancyCount: number;
+    source?: LabelRow['source'];
     notes?: string;
   }): Promise<LabelRow> {
     const label: LabelRow = {
       id: this.nextLabelId++,
       sessionId: params.sessionId,
       time: params.time.toISOString(),
+      endTime: params.endTime ? params.endTime.toISOString() : null,
       occupancyCount: params.occupancyCount,
+      source: params.source ?? 'manual',
       notes: params.notes ?? null,
     };
     this.labels.push(label);
     return label;
+  }
+
+  /** Mirrors PgHomeCsiDb.updateLabelEndTime's not-found/invalid-end-time/updated result shape exactly -- route tests depend on it. */
+  async updateLabelEndTime(params: { id: number; endTime: Date }): Promise<UpdateLabelEndTimeResult> {
+    const label = this.labels.find((l) => l.id === params.id);
+    if (!label) return { status: 'not-found' };
+    if (params.endTime.getTime() <= new Date(label.time).getTime()) return { status: 'invalid-end-time' };
+    label.endTime = params.endTime.toISOString();
+    return { status: 'updated', label };
   }
 }

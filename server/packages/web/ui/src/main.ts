@@ -9,6 +9,7 @@ import { renderOccupancy } from './views/occupancy.js';
 import { renderFeatures } from './views/features.js';
 import { renderLogs } from './views/logs.js';
 import { renderRecording } from './views/recording.js';
+import { renderTraining } from './views/training.js';
 
 type ViewRenderer = (container: HTMLElement) => () => void;
 
@@ -20,6 +21,7 @@ const VIEWS: Array<{ path: string; label: string; render: ViewRenderer }> = [
   { path: 'features', label: 'Feature inspector', render: renderFeatures },
   { path: 'logs', label: 'Log tail', render: renderLogs },
   { path: 'recording', label: 'Recording controls', render: renderRecording },
+  { path: 'training', label: 'Training mode', render: renderTraining },
 ];
 
 const app = document.getElementById('app');

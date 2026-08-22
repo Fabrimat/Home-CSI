@@ -46,7 +46,15 @@ function send(socket: WebSocket, payload: unknown): void {
  *   {"type":"subscribed","channel":..., "key":"csi:1:aa:..:bb:.."}
  *   {"type":"unsubscribed","channel":..., "key":"..."}
  *   {"type":"data","channel":..., "key":"...", "records":[...]}
+ *   {"type":"data","channel":"occupancy","key":"occupancy","snapshot":true,"records":[<latest row>]}
  *   {"type":"error","message":"..."}
+ *
+ * The `snapshot` variant is sent once per socket, on the first poll tick
+ * after subscribing to `occupancy`. `occupancy_states` is a sparse event log
+ * (one row per transition plus a 15-minute keepalive), so a subscriber whose
+ * cursor starts at "now" could otherwise sit blank for a long time. The
+ * snapshot's record is the latest row whatever its age — its `time` is in the
+ * past by design, and clients apply it as the current state (step semantics).
  */
 export function registerWsRoutes(app: FastifyInstance, hub: LiveHub, apiToken: string): void {
   app.get('/api/ws', { websocket: true }, (socket) => {

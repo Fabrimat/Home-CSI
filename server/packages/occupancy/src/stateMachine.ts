@@ -57,10 +57,27 @@ export interface LatchState {
   lastEstimateChangeAtMs: number | null;
   /** Timestamp (ms) of the most recent tick where any link was active; null if motion has never been observed. */
   lastMotionAtMs: number | null;
-  /** Per-link "is currently active" Schmitt-trigger state. */
+  /**
+   * Per-link "is currently active" Schmitt-trigger state. Only *active*
+   * links appear here: a link that goes (or stays) quiet is deleted rather
+   * than stored as `false`. This is load-bearing, not cosmetic — this map
+   * is persisted verbatim inside `occupancy_states.details` (see
+   * pipeline.ts), and keeping falsy entries would make that JSONB accrete
+   * every link key ever seen, forever.
+   */
   linkActive: Record<string, boolean>;
   /** Per-link timestamp (ms) of the most recent false->true activation, used for the cross-link simultaneity check. */
   activeSinceMs: Record<string, number>;
+  /**
+   * Per-active-link timestamp (ms) of that link's most recent observation.
+   * Drives staleness eviction (see stepLatch step 1b): a link that reports
+   * motion and then goes silent forever — an unplugged node — must not keep
+   * its Schmitt state `true` indefinitely, or `anyActive` stays true, which
+   * refreshes `lastMotionAtMs` every tick and latches the whole house
+   * OCCUPIED permanently. Only active links are tracked, for the same
+   * bounded-JSONB reason as `linkActive`.
+   */
+  lastSeenMs: Record<string, number>;
 }
 
 export const INITIAL_LATCH_STATE: LatchState = {
@@ -69,6 +86,7 @@ export const INITIAL_LATCH_STATE: LatchState = {
   lastMotionAtMs: null,
   linkActive: {},
   activeSinceMs: {},
+  lastSeenMs: {},
 };
 
 export interface MultiOccupancyResult {
@@ -182,9 +200,11 @@ export function stepLatch(
   thresholds: LatchThresholds,
   expectedLinkCount: number,
 ): LatchStepResult {
-  // 1. Per-link Schmitt trigger.
+  // 1. Per-link Schmitt trigger. Quiet links are *deleted* rather than
+  //    recorded as `false` — see LatchState.linkActive for why.
   const linkActive: Record<string, boolean> = { ...prev.linkActive };
   const activeSinceMs: Record<string, number> = { ...prev.activeSinceMs };
+  const lastSeenMs: Record<string, number> = { ...prev.lastSeenMs };
 
   for (const obs of observations) {
     const wasActive = linkActive[obs.linkKey] ?? false;
@@ -192,12 +212,30 @@ export function stepLatch(
       ? obs.baselineDeviation > thresholds.motionOffThreshold
       : obs.baselineDeviation >= thresholds.motionOnThreshold;
 
-    if (nowActive && !wasActive) {
-      activeSinceMs[obs.linkKey] = timeMs;
-    } else if (!nowActive) {
+    if (nowActive) {
+      if (!wasActive) activeSinceMs[obs.linkKey] = timeMs;
+      linkActive[obs.linkKey] = true;
+      lastSeenMs[obs.linkKey] = timeMs;
+    } else {
       delete activeSinceMs[obs.linkKey];
+      delete linkActive[obs.linkKey];
+      delete lastSeenMs[obs.linkKey];
     }
-    linkActive[obs.linkKey] = nowActive;
+  }
+
+  // 1b. Staleness eviction. A link keeps its active Schmitt state across
+  //     ticks where it simply didn't report ("no new data" is not
+  //     "confirmed quiet") — but only up to the decay horizon. Past that,
+  //     the evidence is too old to still be called motion, and holding it
+  //     would make an unplugged node an eternal OCCUPIED (see
+  //     LatchState.lastSeenMs).
+  for (const linkKey of Object.keys(linkActive)) {
+    const seenAt = lastSeenMs[linkKey] ?? activeSinceMs[linkKey];
+    if (seenAt === undefined || timeMs - seenAt > thresholds.latchDecayHorizonMs) {
+      delete linkActive[linkKey];
+      delete activeSinceMs[linkKey];
+      delete lastSeenMs[linkKey];
+    }
   }
 
   const activeLinks = Object.keys(linkActive).filter((k) => linkActive[k]);
@@ -270,7 +308,7 @@ export function stepLatch(
   );
 
   return {
-    state: { state, lastEstimateChangeAtMs, lastMotionAtMs, linkActive, activeSinceMs },
+    state: { state, lastEstimateChangeAtMs, lastMotionAtMs, linkActive, activeSinceMs, lastSeenMs },
     estimate,
     confidence,
     activeLinks,

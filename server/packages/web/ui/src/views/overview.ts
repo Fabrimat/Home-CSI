@@ -1,5 +1,11 @@
 import { apiGet, ApiError } from '../api.js';
 import { clear, emptyState, errorState, formatRelative, h } from '../dom.js';
+import {
+  currentRunStartMs,
+  formatDuration,
+  KEEPALIVE_INTERVAL_MS,
+  type OccupancyRow,
+} from '../occupancySeries.js';
 
 interface NodeLiveness {
   id: number;
@@ -7,14 +13,6 @@ interface NodeLiveness {
   room: string;
   lastHeartbeatAt: string | null;
   lastCsiRecordAt: string | null;
-}
-
-interface OccupancyRow {
-  time: string;
-  estimate: number;
-  confidence: number;
-  state: string;
-  details: Record<string, unknown> | null;
 }
 
 interface StatusSummary {
@@ -36,21 +34,27 @@ function isLive(lastSeen: string | null): boolean {
   return Date.now() - new Date(lastSeen).getTime() < LIVE_THRESHOLD_MS;
 }
 
-/** Walks a (time-ascending) occupancy history backwards to find how long the *current* state has held. */
+/**
+ * How long the *current* state has held.
+ *
+ * This is exact rather than clipped to the lookback window, because
+ * /api/occupancy returns a carry-in event from before the window: for a house
+ * that has been occupied since yesterday, the oldest row in `history` is the
+ * transition that started the run, at its real timestamp.
+ */
 function timeInCurrentState(history: OccupancyRow[]): string | null {
-  if (history.length === 0) return null;
-  const current = history[history.length - 1] as OccupancyRow;
-  let start = current.time;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const row = history[i] as OccupancyRow;
-    if (row.state !== current.state) break;
-    start = row.time;
-  }
-  const ms = Date.now() - new Date(start).getTime();
-  const mins = Math.floor(ms / 60000);
-  if (mins < 1) return '<1m';
-  if (mins < 60) return `${mins}m`;
-  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  const startMs = currentRunStartMs(history);
+  return startMs === null ? null : formatDuration(Date.now() - startMs);
+}
+
+/**
+ * True when the latest event is older than the pipeline would leave it while
+ * running (transitions are sparse, but a keepalive lands every
+ * KEEPALIVE_INTERVAL_MS of tick time). Two intervals of slack, so an ordinary
+ * late batch is not called an outage.
+ */
+function occupancyIsStale(latest: OccupancyRow): boolean {
+  return Date.now() - Date.parse(latest.time) > 2 * KEEPALIVE_INTERVAL_MS;
 }
 
 export function renderOverview(container: HTMLElement): () => void {
@@ -101,10 +105,24 @@ export function renderOverview(container: HTMLElement): () => void {
           ? h(
               'div',
               { class: 'grid' },
-              stat('Estimate', occ.estimate === 0 ? '0 (empty)' : occ.estimate === 1 ? '1' : '2+', h('span', { class: 'sub' }, `as of ${formatRelative(occ.time)}`)),
-              stat('Confidence', `${Math.round(occ.confidence * 100)}%`),
+              // Step semantics: the latest event IS the current state, however
+              // old it is. occupancy_states is a sparse event log, so "as of"
+              // is a normal, expected lag, not a fault — but if it exceeds a
+              // couple of keepalive intervals the pipeline has stopped
+              // observing, and that is said out loud rather than implied.
+              stat(
+                'Estimate',
+                occ.estimate === 0 ? '0 (empty)' : occ.estimate === 1 ? '1' : '2+',
+                h('span', { class: 'sub' }, `recorded ${formatRelative(occ.time)}${occupancyIsStale(occ) ? ' — no fresh observations since' : ''}`),
+              ),
+              // Confidence is the value stored with that event, not a live
+              // ramp: the DECAYING ramp is recomputed by the pipeline on every
+              // transition and keepalive, so this figure is at most one
+              // keepalive interval stale, and it is labelled as such rather
+              // than re-derived in the browser.
+              stat('Confidence', `${Math.round(occ.confidence * 100)}%`, h('span', { class: 'sub' }, `as recorded ${formatRelative(occ.time)}`)),
               stat('Internal state', occ.state),
-              stat('Time in state', timeInState ?? '—', h('span', { class: 'sub' }, `over last ${TIME_IN_STATE_LOOKBACK_MS / 3600000}h of history`)),
+              stat('Time in state', timeInState ?? '—', h('span', { class: 'sub' }, 'since the transition that started it')),
             )
           : emptyState(
               'No occupancy_states rows yet — the occupancy pipeline (brief B4) has not produced an estimate. This is an honest empty state, not a placeholder.',

@@ -35,7 +35,9 @@ export function makeTestConfig(nodes: TestNodeSpec[]): Config {
     storage: {
       captureDir: 'unused-default',
       rotation: { maxBytes: 1_000_000, maxIntervalMs: 3_600_000 },
-      retention: { maxAgeMs: 2_592_000_000, maxTotalBytes: 107_374_182_400 },
+      // 7 days / 30 GiB -- matches config.example.yaml's defaults (the
+      // agreed debug window, docs/architecture.md "Data lifecycle").
+      retention: { maxAgeMs: 604_800_000, maxTotalBytes: 32_212_254_720 },
       compression: { enabled: true, afterMs: 86_400_000 },
     },
     features: {

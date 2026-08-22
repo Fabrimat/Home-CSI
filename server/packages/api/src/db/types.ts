@@ -59,11 +59,26 @@ export interface FeatureRow {
   featureVector: Record<string, unknown>;
 }
 
+/**
+ * Why an `occupancy_states` row exists (`row_kind`, migration 006). The
+ * column has a CHECK constraint admitting exactly these two values.
+ *  - `transition`: the estimate and/or the latch's state label changed here.
+ *  - `keepalive`: nothing changed, but the pipeline was observing — proof
+ *    that a quiet stretch is quiet rather than missing. Carries no details.
+ */
+export type OccupancyRowKind = 'transition' | 'keepalive';
+
+/**
+ * One row of the sparse occupancy event log. Rows are events, not samples:
+ * consumers must carry the last value forward until the next row (step
+ * semantics), never interpolate or assume a fixed cadence.
+ */
 export interface OccupancyRow {
   time: string;
   estimate: number;
   confidence: number;
   state: string;
+  kind: OccupancyRowKind;
   details: Record<string, unknown> | null;
 }
 
@@ -74,11 +89,24 @@ export interface LabelSessionRow {
   notes: string | null;
 }
 
+/**
+ * Explicit label provenance (migration 008's `labels.source` CHECK
+ * constraint admits exactly these four values) -- mirrors
+ * `@homecsi/labeling`'s `LabelSource` (sessions.ts), duplicated here rather
+ * than imported so this package's wire contract doesn't take on a runtime
+ * dependency on @homecsi/labeling's internal type just for a string union.
+ */
+export type LabelSource = 'manual' | 'weak:phone-presence' | 'confirmed' | 'training';
+
 export interface LabelRow {
   id: number;
   sessionId: number;
+  /** ISO-8601. Interval START, or the instant for a point label. */
   time: string;
+  /** ISO-8601, EXCLUSIVE end. `null` means a point label (migration 008). */
+  endTime: string | null;
   occupancyCount: number;
+  source: LabelSource;
   notes: string | null;
 }
 
@@ -96,6 +124,17 @@ export interface TimeRange {
   from: Date;
   to: Date;
 }
+
+/**
+ * Result of `HomeCsiDb.updateLabelEndTime`. A discriminated union rather
+ * than `null`/throw so the route can distinguish "no such label" (404)
+ * from "the requested endTime is not after the label's own time" (400)
+ * without a second query to re-fetch the label just to check.
+ */
+export type UpdateLabelEndTimeResult =
+  | { status: 'updated'; label: LabelRow }
+  | { status: 'not-found' }
+  | { status: 'invalid-end-time' };
 
 export interface HomeCsiDb {
   /** Round-trips a trivial query; used for the unauthenticated liveness route too. */
@@ -128,9 +167,29 @@ export interface HomeCsiDb {
     params: TimeRange & { nodeId: number; linkMac?: string; maxPoints: number },
   ): Promise<FeatureRow[]>;
 
+  /**
+   * Occupancy events in [from, to), ascending, **plus a carry-in row**: the
+   * last event at or before `from`, returned with its real (pre-window)
+   * timestamp. Without it a window containing no transitions would come back
+   * empty and the UI would render "no data" for a house that has been
+   * occupied for three hours.
+   *
+   * `limit` now bounds *events*, not samples. When rows were written every
+   * 500 ms, trimming dropped redundant samples; now every row is a semantic
+   * event, so trimming silently drops transitions. Implementations keep the
+   * newest events and the carry-in.
+   */
   listOccupancyStates(params: TimeRange & { limit: number }): Promise<OccupancyRow[]>;
 
   pollOccupancyStates(params: { since: Date; limit: number }): Promise<OccupancyRow[]>;
+
+  /**
+   * The most recent occupancy event, however old — the current state under
+   * step semantics. Used for the WebSocket initial snapshot: with a sparse
+   * log, a fresh subscriber would otherwise see nothing until the next
+   * transition (up to a keepalive interval away, or longer).
+   */
+  getLatestOccupancyState(): Promise<OccupancyRow | null>;
 
   getStatusSummary(windowMs: number): Promise<StatusSummary>;
 
@@ -144,7 +203,35 @@ export interface HomeCsiDb {
     params: { sessionId: number; limit: number },
   ): Promise<LabelRow[]>;
 
+  /**
+   * Labels across ALL sessions whose interval *overlaps* [from, to) --
+   * `time < to AND COALESCE(end_time, time) >= from` -- so the dashboard
+   * can show existing corrections on the timeline without first picking a
+   * session. Ordered `time` ascending. Unlike `listLabels`, this is not
+   * scoped to one session.
+   */
+  listLabelsInRange(params: TimeRange & { limit: number }): Promise<LabelRow[]>;
+
   createLabel(
-    params: { sessionId: number; time: Date; occupancyCount: number; notes?: string },
+    params: {
+      sessionId: number;
+      time: Date;
+      /** EXCLUSIVE end of the labelled interval; omitted (or undefined) means a point label. */
+      endTime?: Date;
+      occupancyCount: number;
+      /** Defaults to `'manual'` when omitted, matching migration 008's column default. */
+      source?: LabelSource;
+      notes?: string;
+    },
   ): Promise<LabelRow>;
+
+  /**
+   * Updates only a label's `end_time` -- used by brief B14's training mode
+   * to close a previously-open declaration when the operator declares the
+   * next state. Returns a discriminated result rather than `null`/throw so
+   * the route can tell "no such label" (404) apart from "the requested
+   * endTime is not after the label's own time" (400) without a second
+   * round-trip to re-fetch the label.
+   */
+  updateLabelEndTime(params: { id: number; endTime: Date }): Promise<UpdateLabelEndTimeResult>;
 }

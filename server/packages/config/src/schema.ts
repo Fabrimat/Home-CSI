@@ -101,6 +101,34 @@ const loggingSchema = z.object({
   }),
 });
 
+// Entirely optional, unlike every section above: this knob was added after
+// the rest of the schema (brief B8, docs/architecture.md "Data lifecycle"),
+// and @homecsi/labeling's training-set preservation already has sane
+// built-in fallback constants (see trainingPreservation.ts) for when it's
+// omitted. Making the whole section optional -- rather than giving each
+// field a zod `.default()` -- keeps `Config` structurally backward
+// compatible for any code that builds a `Config` object literal directly
+// (bypassing loadConfig/zod parsing, e.g. test helpers in sibling
+// packages) without those call sites needing to learn about this key.
+const trainingSchema = z
+  .object({
+    preservation: z.object({
+      // Length of the recent "known-alive" window used as this
+      // deployment's live feature-row density baseline, which a preserved
+      // window's own density is compared against (see
+      // trainingPreservation.ts's `checkDensity`) -- self-calibrates to
+      // this house's actual mesh/audibility instead of assuming every
+      // node hears every other node.
+      baselineWindowMs: z.coerce.number().int().positive(),
+      // Minimum fraction of that live baseline's density a preserved
+      // window must show to be treated as healthy rather than partially
+      // or fully retention-dropped. Set to 0 to disable the density
+      // sanity-check entirely (trust `found` as-is).
+      minDensityFraction: z.coerce.number().min(0).max(1),
+    }),
+  })
+  .optional();
+
 export const configSchema = z.object({
   server: serverSchema,
   database: databaseSchema,
@@ -109,6 +137,7 @@ export const configSchema = z.object({
   features: featuresSchema,
   occupancy: occupancySchema,
   logging: loggingSchema,
+  training: trainingSchema,
 });
 
 export type Config = z.infer<typeof configSchema>;

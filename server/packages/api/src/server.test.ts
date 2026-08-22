@@ -161,6 +161,7 @@ describe('bounded result sets', () => {
         estimate: i % 2,
         confidence: 0.5,
         state: 'unoccupied',
+        kind: 'transition',
         details: null,
       });
     }
@@ -283,6 +284,7 @@ describe('occupancy view exposes internal state, not just the estimate', () => {
       estimate: 1,
       confidence: 0.82,
       state: 'occupied',
+      kind: 'transition',
       details: { motionLinks: ['aa:bb:cc:dd:ee:01'] },
     });
     const { app } = makeApp(db);
@@ -293,6 +295,56 @@ describe('occupancy view exposes internal state, not just the estimate', () => {
     });
     const body = res.json() as { states: Array<Record<string, unknown>> };
     expect(body.states[0]).toMatchObject({ estimate: 1, confidence: 0.82, state: 'occupied' });
+  });
+});
+
+describe('occupancy is a sparse event log, read with step semantics', () => {
+  it('returns the carry-in event, with its real pre-window timestamp, for a window with no transitions', async () => {
+    const db = new FakeHomeCsiDb();
+    // The house went OCCUPIED three hours ago and nothing has changed since.
+    db.occupancyStates.push({
+      time: '2026-01-01T00:00:00.000Z',
+      estimate: 1,
+      confidence: 0.85,
+      state: 'OCCUPIED',
+      kind: 'transition',
+      details: null,
+    });
+    const { app } = makeApp(db);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/occupancy?from=2026-01-01T03:00:00Z&to=2026-01-01T04:00:00Z',
+      headers: authHeader(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { states: Array<{ time: string; state: string }> };
+    expect(body.states).toHaveLength(1);
+    expect(body.states[0]?.time).toBe('2026-01-01T00:00:00.000Z');
+    expect(body.states[0]?.state).toBe('OCCUPIED');
+  });
+
+  it('exposes row_kind so a consumer can tell a transition from a keepalive', async () => {
+    const db = new FakeHomeCsiDb();
+    db.occupancyStates.push({
+      time: '2026-01-01T00:00:00.000Z',
+      estimate: 0,
+      confidence: 0.9,
+      state: 'UNOCCUPIED',
+      kind: 'keepalive',
+      details: null,
+    });
+    const { app } = makeApp(db);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/occupancy?from=2025-12-31T00:00:00Z&to=2026-01-02T00:00:00Z',
+      headers: authHeader(),
+    });
+
+    const body = res.json() as { states: Array<{ kind: string }> };
+    expect(body.states[0]?.kind).toBe('keepalive');
   });
 });
 

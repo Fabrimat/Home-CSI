@@ -93,8 +93,8 @@ export function renderRecording(container: HTMLElement): () => void {
       return;
     }
     try {
-      await apiPost(`/api/labels/sessions/${sessionId}/stop`);
-      message.textContent = 'Session stopped.';
+      const res = await apiPost<{ session: unknown; preservationWarning?: string }>(`/api/labels/sessions/${sessionId}/stop`);
+      message.textContent = res.preservationWarning ?? 'Session stopped.';
       await refresh();
     } catch (err) {
       message.textContent = err instanceof ApiError ? err.message : String(err);

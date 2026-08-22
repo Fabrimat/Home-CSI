@@ -26,6 +26,7 @@ function makeDb(overrides: Partial<HomeCsiDb> = {}): HomeCsiDb {
     listFeatures: vi.fn(),
     listOccupancyStates: vi.fn(),
     pollOccupancyStates: vi.fn().mockResolvedValue([]),
+    getLatestOccupancyState: vi.fn().mockResolvedValue(null),
     getStatusSummary: vi.fn(),
     listLabelSessions: vi.fn(),
     createLabelSession: vi.fn(),
@@ -108,5 +109,92 @@ describe('LiveHub', () => {
     hub.removeSocket(socket as never);
     await vi.advanceTimersByTimeAsync(3000);
     expect(pollHeartbeats).not.toHaveBeenCalled();
+  });
+});
+
+describe('LiveHub occupancy snapshot', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const LATEST = {
+    time: '2026-01-01T00:00:00.000Z',
+    estimate: 1,
+    confidence: 0.85,
+    state: 'OCCUPIED',
+    kind: 'transition',
+    details: null,
+  };
+
+  it('sends a fresh subscriber the current state without waiting for the next transition', async () => {
+    // The sparse event log may have nothing new for hours; `since` is set to
+    // "now" on subscribe, so with no snapshot the client would render blank.
+    const getLatestOccupancyState = vi.fn().mockResolvedValue(LATEST);
+    const hub = new LiveHub(makeDb({ getLatestOccupancyState }), { warn: vi.fn() });
+    const socket = new FakeSocket();
+    hub.subscribe(socket as never, { channel: 'occupancy' });
+
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(socket.sent).toHaveLength(1);
+    const payload = JSON.parse(socket.sent[0] as string) as {
+      snapshot?: boolean;
+      channel: string;
+      records: Array<{ time: string }>;
+    };
+    expect(payload.snapshot).toBe(true);
+    expect(payload.channel).toBe('occupancy');
+    expect(payload.records[0]?.time).toBe(LATEST.time);
+  });
+
+  it('sends the snapshot once per socket, including a socket that joins an already-running feed', async () => {
+    const getLatestOccupancyState = vi.fn().mockResolvedValue(LATEST);
+    const hub = new LiveHub(makeDb({ getLatestOccupancyState }), { warn: vi.fn() });
+    const first = new FakeSocket();
+    hub.subscribe(first as never, { channel: 'occupancy' });
+    await vi.advanceTimersByTimeAsync(750);
+    expect(first.sent).toHaveLength(1);
+
+    const late = new FakeSocket();
+    hub.subscribe(late as never, { channel: 'occupancy' });
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(late.sent).toHaveLength(1);
+    expect(first.sent).toHaveLength(1); // not re-sent to a socket that already has it
+  });
+
+  it('does not snapshot dense channels (csi/heartbeat), where a stale row is noise not state', async () => {
+    const getLatestOccupancyState = vi.fn().mockResolvedValue(LATEST);
+    const hub = new LiveHub(makeDb({ getLatestOccupancyState }), { warn: vi.fn() });
+    const socket = new FakeSocket();
+    hub.subscribe(socket as never, { channel: 'heartbeat', nodeId: 1 });
+
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(getLatestOccupancyState).not.toHaveBeenCalled();
+    expect(socket.sent).toHaveLength(0);
+  });
+
+  it('still delivers polled rows normally when there is nothing to snapshot', async () => {
+    const pollOccupancyStates = vi
+      .fn()
+      .mockResolvedValueOnce([{ ...LATEST, time: '2026-01-01T00:00:05.000Z' }])
+      .mockResolvedValue([]);
+    const hub = new LiveHub(
+      makeDb({ pollOccupancyStates, getLatestOccupancyState: vi.fn().mockResolvedValue(null) }),
+      { warn: vi.fn() },
+    );
+    const socket = new FakeSocket();
+    hub.subscribe(socket as never, { channel: 'occupancy' });
+
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(socket.sent).toHaveLength(1);
+    const payload = JSON.parse(socket.sent[0] as string) as { snapshot?: boolean; records: unknown[] };
+    expect(payload.snapshot).toBeUndefined();
+    expect(payload.records).toHaveLength(1);
   });
 });

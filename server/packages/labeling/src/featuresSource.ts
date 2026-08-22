@@ -23,7 +23,21 @@ interface RawFeatureRow {
   };
 }
 
-/** Real Postgres-backed FeaturesReader, used by the CLI entry point. */
+/**
+ * Real Postgres-backed FeaturesReader, used by the CLI entry point.
+ *
+ * Reads from `features` UNIONed with `training_features` (migration 007):
+ * `features` only holds the last 7 days (docs/architecture.md "Data
+ * lifecycle"), so for any label older than that, the only surviving
+ * per-link rows for a MANUAL session live in `training_features` instead
+ * (see trainingPreservation.ts). Plain `UNION` (not `UNION ALL`)
+ * deliberately de-dupes the case where a row currently exists in both
+ * tables (already preserved, not yet aged out of `features`) so it isn't
+ * double-counted in `joinLabelsWithFeatures`'s per-link averages — this
+ * only works because a preserved row's columns are copied verbatim, so
+ * the same (time, node_id, link_mac, feature_vector) tuple compares equal
+ * in both places.
+ */
 export function createPgFeaturesReader(pool: DbPool): FeaturesReader {
   return {
     async fetchFeaturesForExport(fromMs, toMs) {
@@ -31,6 +45,10 @@ export function createPgFeaturesReader(pool: DbPool): FeaturesReader {
         `SELECT time, node_id, link_mac, feature_vector
          FROM features
          WHERE time >= $1::timestamptz AND time <= $2::timestamptz AND link_mac IS NOT NULL
+         UNION
+         SELECT time, node_id, link_mac, feature_vector
+         FROM training_features
+         WHERE time >= $1::timestamptz AND time <= $2::timestamptz
          ORDER BY time ASC`,
         [new Date(fromMs).toISOString(), new Date(toMs).toISOString()],
       );

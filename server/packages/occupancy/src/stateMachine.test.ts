@@ -246,3 +246,56 @@ describe('no data ever observed', () => {
     expect(result.confidence).toBe(0);
   });
 });
+
+describe('link staleness eviction', () => {
+  it('drops a link that stops reporting for longer than the decay horizon, so it cannot hold the house OCCUPIED forever', () => {
+    // 1:aa goes active once and is then never heard from again (node
+    // unplugged mid-motion). 2:bb keeps reporting, quietly. Without
+    // staleness eviction 1:aa's Schmitt state stays true forever, which
+    // keeps refreshing lastMotionAtMs and latches the house OCCUPIED for
+    // good.
+    const ticks: Array<{ timeMs: number; observations: LinkObservation[] }> = [
+      { timeMs: 0, observations: [motion('1:aa'), quiet('2:bb')] },
+    ];
+    for (let t = 60_000; t <= 4 * THRESHOLDS.latchDecayHorizonMs; t += 60_000) {
+      ticks.push({ timeMs: t, observations: [quiet('2:bb')] });
+    }
+
+    const results = run(ticks);
+    const last = results[results.length - 1] as (typeof results)[number];
+
+    expect(last.state.linkActive['1:aa']).toBeUndefined();
+    expect(last.activeLinks).toEqual([]);
+    expect(last.state.state).toBe('UNOCCUPIED');
+    expect(last.estimate).toBe(0);
+  });
+
+  it('does not evict a link that keeps reporting while continuously active', () => {
+    const ticks: Array<{ timeMs: number; observations: LinkObservation[] }> = [];
+    for (let t = 0; t <= 2 * THRESHOLDS.latchDecayHorizonMs; t += 60_000) {
+      ticks.push({ timeMs: t, observations: [motion('1:aa')] });
+    }
+
+    const results = run(ticks);
+    const last = results[results.length - 1] as (typeof results)[number];
+
+    expect(last.activeLinks).toEqual(['1:aa']);
+    expect(last.state.state).toBe('OCCUPIED');
+  });
+});
+
+describe('latch state hygiene', () => {
+  it('never carries falsy linkActive entries (the persisted details JSONB must stay bounded)', () => {
+    const results = run([
+      { timeMs: 0, observations: [motion('1:aa')] },
+      { timeMs: 500, observations: [quiet('1:aa')] },
+      { timeMs: 1_000, observations: [quiet('2:bb')] },
+      { timeMs: 1_500, observations: [quiet('3:cc')] },
+    ]);
+    const last = results[results.length - 1] as (typeof results)[number];
+
+    expect(Object.keys(last.state.linkActive)).toEqual([]);
+    expect(Object.keys(last.state.activeSinceMs)).toEqual([]);
+    expect(Object.keys(last.state.lastSeenMs)).toEqual([]);
+  });
+});

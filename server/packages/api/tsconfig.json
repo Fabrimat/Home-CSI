@@ -8,6 +8,7 @@
   "references": [
     { "path": "../config" },
     { "path": "../db" },
+    { "path": "../labeling" },
     { "path": "../protocol" },
     { "path": "../web" }
   ]

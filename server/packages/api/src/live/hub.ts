@@ -45,6 +45,12 @@ interface Feed {
   since: Date;
   timer: ReturnType<typeof setInterval>;
   polling: boolean;
+  /**
+   * Sockets still owed the one-time initial snapshot. Occupancy only — see
+   * LiveHub.tick. Per-socket rather than per-feed so a socket that joins an
+   * already-running feed is also caught up.
+   */
+  pendingSnapshot: Set<WebSocket>;
 }
 
 /**
@@ -59,6 +65,14 @@ interface Feed {
  * server-side rate limit (a socket can receive at most one coalesced batch
  * per POLL_INTERVAL_MS) and the coalescing (all rows produced since the
  * last tick arrive in a single message).
+ *
+ * One exception to "rows newer than the cursor": `occupancy` is a sparse
+ * *event* log, not a dense sample stream. A subscriber's cursor starts at
+ * "now", so with nothing but a poll it would see an empty panel until the
+ * next transition — potentially hours. Each new occupancy subscriber
+ * therefore gets a one-time `snapshot` message carrying the latest row
+ * (whatever its age) before normal polling continues. Dense channels get no
+ * snapshot: there, a stale row is noise, not state.
  */
 export class LiveHub {
   private readonly feeds = new Map<string, Feed>();
@@ -78,6 +92,7 @@ export class LiveHub {
         subscribers: new Set(),
         since: new Date(),
         polling: false,
+        pendingSnapshot: new Set(),
         timer: setInterval(() => {
           void this.tick(key);
         }, POLL_INTERVAL_MS),
@@ -85,6 +100,7 @@ export class LiveHub {
       this.feeds.set(key, feed);
     }
     feed.subscribers.add(socket);
+    if (sub.channel === 'occupancy') feed.pendingSnapshot.add(socket);
 
     let keys = this.socketFeeds.get(socket);
     if (!keys) {
@@ -112,6 +128,7 @@ export class LiveHub {
     const feed = this.feeds.get(key);
     if (!feed) return;
     feed.subscribers.delete(socket);
+    feed.pendingSnapshot.delete(socket);
     this.socketFeeds.get(socket)?.delete(key);
     if (feed.subscribers.size === 0) {
       clearInterval(feed.timer);
@@ -124,6 +141,8 @@ export class LiveHub {
     if (!feed || feed.polling || feed.subscribers.size === 0) return;
     feed.polling = true;
     try {
+      await this.sendPendingSnapshots(feed, key);
+
       const since = feed.since;
       let rows: Array<{ time: string }>;
       switch (feed.sub.channel) {
@@ -160,6 +179,29 @@ export class LiveHub {
     } finally {
       feed.polling = false;
     }
+  }
+
+  /**
+   * Delivers the one-time initial occupancy snapshot to any socket still
+   * owed one. Sockets are only marked as served once the send has actually
+   * happened, so a failed DB read simply retries on the next tick instead of
+   * silently leaving a subscriber with a blank panel.
+   */
+  private async sendPendingSnapshots(feed: Feed, key: string): Promise<void> {
+    if (feed.sub.channel !== 'occupancy' || feed.pendingSnapshot.size === 0) return;
+    const targets = [...feed.pendingSnapshot];
+    const latest = await this.db.getLatestOccupancyState();
+    if (latest) {
+      const message = JSON.stringify({
+        type: 'data',
+        channel: feed.sub.channel,
+        key,
+        snapshot: true,
+        records: [latest],
+      });
+      for (const socket of targets) this.sendCoalesced(socket, message);
+    }
+    for (const socket of targets) feed.pendingSnapshot.delete(socket);
   }
 
   /**

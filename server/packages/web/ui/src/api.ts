@@ -63,3 +63,10 @@ export function apiGet<T>(path: string): Promise<T> {
 export function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return apiFetch<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
 }
+
+// Added by brief B14 (training mode): closing a declaration's open interval
+// is a PATCH /api/labels/:labelId, and this file previously only exposed
+// GET/POST helpers.
+export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  return apiFetch<T>(path, { method: 'PATCH', body: body === undefined ? undefined : JSON.stringify(body) });
+}

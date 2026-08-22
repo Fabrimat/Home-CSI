@@ -8,11 +8,14 @@ import type {
   HomeCsiDb,
   LabelRow,
   LabelSessionRow,
+  LabelSource,
   LinkSummary,
   NodeLiveness,
   OccupancyRow,
+  OccupancyRowKind,
   StatusSummary,
   TimeRange,
+  UpdateLabelEndTimeResult,
 } from './types.js';
 
 interface CsiRecordDbRow {
@@ -30,6 +33,50 @@ function toCsiPoint(row: CsiRecordDbRow): CsiPoint {
     noiseFloor: row.noise_floor,
     csiFormat: row.csi_format,
     amplitudes: decodeAmplitudes(row.csi_data),
+  };
+}
+
+interface OccupancyDbRow {
+  time: Date;
+  estimate: number;
+  confidence: number;
+  state: string;
+  row_kind: string;
+  details: Record<string, unknown> | null;
+}
+
+/** `row_kind` is CHECK-constrained to the OccupancyRowKind union by migration 006. */
+function toOccupancyRow(row: OccupancyDbRow): OccupancyRow {
+  return {
+    time: row.time.toISOString(),
+    estimate: row.estimate,
+    confidence: row.confidence,
+    state: row.state,
+    kind: row.row_kind as OccupancyRowKind,
+    details: row.details,
+  };
+}
+
+interface LabelDbRow {
+  id: string;
+  session_id: string;
+  time: Date;
+  end_time: Date | null;
+  occupancy_count: number;
+  source: string;
+  notes: string | null;
+}
+
+/** `source` is CHECK-constrained to the LabelSource union by migration 008. */
+function toLabelRow(row: LabelDbRow): LabelRow {
+  return {
+    id: Number(row.id),
+    sessionId: Number(row.session_id),
+    time: row.time.toISOString(),
+    endTime: row.end_time ? row.end_time.toISOString() : null,
+    occupancyCount: row.occupancy_count,
+    source: row.source as LabelSource,
+    notes: row.notes,
   };
 }
 
@@ -277,54 +324,75 @@ export class PgHomeCsiDb implements HomeCsiDb {
       .sort((a, b) => a.time.localeCompare(b.time));
   }
 
+  /**
+   * Sparse-log read: the events inside [from, to), plus a carry-in event
+   * from before it.
+   *
+   * The carry-in is fetched as its own `time <= from ... LIMIT 1` query
+   * rather than by widening the range, deliberately. This query orders DESC
+   * and *then* limits, so on a busy range the rows `LIMIT` throws away are
+   * the oldest ones — which is exactly the carry-in we are trying to keep.
+   *
+   * `limit` bounds events, not samples: see HomeCsiDb.listOccupancyStates.
+   */
   async listOccupancyStates(params: TimeRange & { limit: number }): Promise<OccupancyRow[]> {
-    const result = await this.pool.query<{
-      time: Date;
-      estimate: number;
-      confidence: number;
-      state: string;
-      details: Record<string, unknown> | null;
-    }>(
-      `SELECT time, estimate, confidence, state, details
-       FROM occupancy_states
-       WHERE time >= $1 AND time < $2
-       ORDER BY time DESC
-       LIMIT $3`,
-      [params.from, params.to, params.limit],
-    );
-    return result.rows
-      .map((row) => ({
-        time: row.time.toISOString(),
-        estimate: row.estimate,
-        confidence: row.confidence,
-        state: row.state,
-        details: row.details,
-      }))
+    const [inWindow, carryIn] = await Promise.all([
+      this.pool.query<OccupancyDbRow>(
+        `SELECT time, estimate, confidence, state, row_kind, details
+         FROM occupancy_states
+         WHERE time >= $1 AND time < $2
+         ORDER BY time DESC
+         LIMIT $3`,
+        [params.from, params.to, params.limit],
+      ),
+      this.pool.query<OccupancyDbRow>(
+        `SELECT time, estimate, confidence, state, row_kind, details
+         FROM occupancy_states
+         WHERE time <= $1
+         ORDER BY time DESC
+         LIMIT 1`,
+        [params.from],
+      ),
+    ]);
+
+    const rows = [...inWindow.rows, ...carryIn.rows]
+      .map(toOccupancyRow)
       .sort((a, b) => a.time.localeCompare(b.time));
+
+    // `time <= from` can return a row that is also the first in-window row
+    // (an event landing exactly on `from`); occupancy_states has one row per
+    // instant (unique index, migration 006), so dedup by timestamp.
+    const deduped = rows.filter((row, i) => i === 0 || row.time !== (rows[i - 1] as OccupancyRow).time);
+
+    // The carry-in is context, not a result, but the response still honours
+    // `limit` overall: when both together overflow it, the carry-in is kept
+    // and the *oldest* in-window events are dropped. Losing them loses
+    // transitions outright — see HomeCsiDb.listOccupancyStates.
+    if (deduped.length <= params.limit) return deduped;
+    return [deduped[0] as OccupancyRow, ...deduped.slice(deduped.length - (params.limit - 1))];
   }
 
   async pollOccupancyStates(params: { since: Date; limit: number }): Promise<OccupancyRow[]> {
-    const result = await this.pool.query<{
-      time: Date;
-      estimate: number;
-      confidence: number;
-      state: string;
-      details: Record<string, unknown> | null;
-    }>(
-      `SELECT time, estimate, confidence, state, details
+    const result = await this.pool.query<OccupancyDbRow>(
+      `SELECT time, estimate, confidence, state, row_kind, details
        FROM occupancy_states
        WHERE time > $1
        ORDER BY time ASC
        LIMIT $2`,
       [params.since, params.limit],
     );
-    return result.rows.map((row) => ({
-      time: row.time.toISOString(),
-      estimate: row.estimate,
-      confidence: row.confidence,
-      state: row.state,
-      details: row.details,
-    }));
+    return result.rows.map(toOccupancyRow);
+  }
+
+  async getLatestOccupancyState(): Promise<OccupancyRow | null> {
+    const result = await this.pool.query<OccupancyDbRow>(
+      `SELECT time, estimate, confidence, state, row_kind, details
+       FROM occupancy_states
+       ORDER BY time DESC
+       LIMIT 1`,
+    );
+    const row = result.rows[0];
+    return row ? toOccupancyRow(row) : null;
   }
 
   async getStatusSummary(windowMs: number): Promise<StatusSummary> {
@@ -350,13 +418,13 @@ export class PgHomeCsiDb implements HomeCsiDb {
            WHERE time > now() - $1::interval`,
           [interval],
         ),
-        this.pool.query<{
-          time: Date;
-          estimate: number;
-          confidence: number;
-          state: string;
-          details: Record<string, unknown> | null;
-        }>('SELECT time, estimate, confidence, state, details FROM occupancy_states ORDER BY time DESC LIMIT 1'),
+        // Deliberately unfiltered by recency: under the sparse event log the
+        // latest row is the current state no matter how long ago it was
+        // written, so a "last N minutes" filter would blank the summary out
+        // during exactly the quiet periods it is meant to describe.
+        this.pool.query<OccupancyDbRow>(
+          'SELECT time, estimate, confidence, state, row_kind, details FROM occupancy_states ORDER BY time DESC LIMIT 1',
+        ),
         this.pool.query<{ count: string }>(
           `SELECT count(*)::bigint AS count FROM csi_records WHERE time > now() - $1::interval`,
           [interval],
@@ -374,15 +442,7 @@ export class PgHomeCsiDb implements HomeCsiDb {
       windowMs,
       nodeCount: Number(nodeCountResult.rows[0]?.count ?? 0),
       liveNodeCount: Number(liveNodeResult.rows[0]?.count ?? 0),
-      latestOccupancy: occupancyRow
-        ? {
-            time: occupancyRow.time.toISOString(),
-            estimate: occupancyRow.estimate,
-            confidence: occupancyRow.confidence,
-            state: occupancyRow.state,
-            details: occupancyRow.details,
-          }
-        : null,
+      latestOccupancy: occupancyRow ? toOccupancyRow(occupancyRow) : null,
       recentCsiRecordCount: Number(csiCountResult.rows[0]?.count ?? 0),
       recentHeartbeatCount: Number(heartbeatCountResult.rows[0]?.count ?? 0),
     };
@@ -451,54 +511,103 @@ export class PgHomeCsiDb implements HomeCsiDb {
   }
 
   async listLabels(params: { sessionId: number; limit: number }): Promise<LabelRow[]> {
-    const result = await this.pool.query<{
-      id: string;
-      session_id: string;
-      time: Date;
-      occupancy_count: number;
-      notes: string | null;
-    }>(
-      `SELECT id, session_id, time, occupancy_count, notes
+    const result = await this.pool.query<LabelDbRow>(
+      `SELECT id, session_id, time, end_time, occupancy_count, source, notes
        FROM labels
        WHERE session_id = $1
        ORDER BY time ASC
        LIMIT $2`,
       [params.sessionId, params.limit],
     );
-    return result.rows.map((row) => ({
-      id: Number(row.id),
-      sessionId: Number(row.session_id),
-      time: row.time.toISOString(),
-      occupancyCount: row.occupancy_count,
-      notes: row.notes,
-    }));
+    return result.rows.map(toLabelRow);
+  }
+
+  /**
+   * Overlap predicate, not containment: a label whose interval merely
+   * *touches* [from, to) -- e.g. it started before `from` and ends inside
+   * the window -- must still show up, or a dashboard paging through history
+   * would visually "lose" the tail of a long correction at every window
+   * boundary.
+   *
+   * `end_time` is EXCLUSIVE everywhere else in the system (the CHECK
+   * constraint, dataset export's expansion filter, the UI's clamping) --
+   * this must agree, or abutting training-mode intervals would double-count
+   * the tick at their shared boundary. That makes the boundary check
+   * different for a point label than for a real interval: a point label
+   * (`end_time IS NULL`) is a single instant, included whenever it falls
+   * anywhere in [from, to) -- i.e. `time >= from` -- while a real interval
+   * [time, end_time) only touches the window if `end_time > from` (an
+   * interval that ends exactly at `from` does not reach into it, since
+   * `end_time` itself is excluded from the interval it closes). A single
+   * `COALESCE(end_time, time) >= from` cannot express both rules at once --
+   * it would wrongly include a real interval that ends exactly at `from`.
+   */
+  async listLabelsInRange(params: TimeRange & { limit: number }): Promise<LabelRow[]> {
+    const result = await this.pool.query<LabelDbRow>(
+      `SELECT id, session_id, time, end_time, occupancy_count, source, notes
+       FROM labels
+       WHERE time < $2
+         AND (
+           (end_time IS NULL AND time >= $1)
+           OR (end_time IS NOT NULL AND end_time > $1)
+         )
+       ORDER BY time ASC
+       LIMIT $3`,
+      [params.from, params.to, params.limit],
+    );
+    return result.rows.map(toLabelRow);
   }
 
   async createLabel(params: {
     sessionId: number;
     time: Date;
+    endTime?: Date;
     occupancyCount: number;
+    source?: LabelSource;
     notes?: string;
   }): Promise<LabelRow> {
-    const result = await this.pool.query<{
-      id: string;
-      session_id: string;
-      time: Date;
-      occupancy_count: number;
-      notes: string | null;
-    }>(
-      `INSERT INTO labels (session_id, time, occupancy_count, notes) VALUES ($1, $2, $3, $4)
-       RETURNING id, session_id, time, occupancy_count, notes`,
-      [params.sessionId, params.time, params.occupancyCount, params.notes ?? null],
+    const result = await this.pool.query<LabelDbRow>(
+      `INSERT INTO labels (session_id, time, end_time, occupancy_count, source, notes) VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, session_id, time, end_time, occupancy_count, source, notes`,
+      [
+        params.sessionId,
+        params.time,
+        params.endTime ?? null,
+        params.occupancyCount,
+        params.source ?? 'manual',
+        params.notes ?? null,
+      ],
     );
     const row = result.rows[0];
     if (!row) throw new Error('insert into labels returned no row');
-    return {
-      id: Number(row.id),
-      sessionId: Number(row.session_id),
-      time: row.time.toISOString(),
-      occupancyCount: row.occupancy_count,
-      notes: row.notes,
-    };
+    return toLabelRow(row);
+  }
+
+  /**
+   * Fetches the label's current `time` first, rather than relying solely on
+   * the `end_time > time` CHECK constraint (migration 008) to reject a bad
+   * request: a raw constraint-violation error from the UPDATE would be
+   * indistinguishable from any other Postgres error at this layer, and the
+   * route needs to tell "no such label" (404) apart from "endTime not after
+   * time" (400) to answer correctly. The CHECK constraint itself is
+   * defense-in-depth against any other write path, not removed.
+   */
+  async updateLabelEndTime(params: { id: number; endTime: Date }): Promise<UpdateLabelEndTimeResult> {
+    const existing = await this.pool.query<{ time: Date }>('SELECT time FROM labels WHERE id = $1', [params.id]);
+    const existingRow = existing.rows[0];
+    if (!existingRow) return { status: 'not-found' };
+    if (params.endTime.getTime() <= existingRow.time.getTime()) return { status: 'invalid-end-time' };
+
+    const result = await this.pool.query<LabelDbRow>(
+      `UPDATE labels SET end_time = $2 WHERE id = $1
+       RETURNING id, session_id, time, end_time, occupancy_count, source, notes`,
+      [params.id, params.endTime],
+    );
+    const row = result.rows[0];
+    // Defensive only: the label existed a moment ago (the SELECT above) and
+    // nothing in this codebase deletes labels, so this should be
+    // unreachable in practice.
+    if (!row) return { status: 'not-found' };
+    return { status: 'updated', label: toLabelRow(row) };
   }
 }

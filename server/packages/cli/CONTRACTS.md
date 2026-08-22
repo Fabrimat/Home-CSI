@@ -81,6 +81,28 @@ await mod.<exportName>(<args>);
 (the fully validated config object — see `packages/config/src/schema.ts`
 for its shape).
 
+### `label` sub-command surface (informational, not a signature contract)
+
+`runLabelCli`'s own signature (`(args, config) => Promise<void>`) never
+changes — `@homecsi/labeling` owns parsing everything after `label` itself
+(see its row above). This section documents that sub-command surface
+anyway, since it's easy for it to silently drift from what the package
+actually does. Current sub-commands: `session start|stop|list`, `add`,
+`list`, `export`, `preserve`, `presence add-device|remove-device|list-devices|probe`.
+
+- `label add --count <n> [--time <iso>] [--until <iso>] [--session <id>] [--notes <text>]`
+  — `--time` defaults to now; `--until` is new (migration 008's
+  `labels.end_time`, brief B15): when given, writes an INTERVAL label
+  (`end_time` exclusive) instead of a point label. Rejected with a clear
+  error if `--until` is at or before `--time`. Without `--until`, behaviour
+  is unchanged (point label, `end_time` stays `NULL`).
+- `label export --out <path> [--session <id>] [--tolerance-ms <n>] [--motion-on-threshold <n>]`
+  and `train [--out <dir>] [--split <ratio>] [--session <id>] [--tolerance-ms <n>]`
+  both expand an interval label into one row per shared hop-grid tick
+  inside `[time, end_time)` (see `@homecsi/labeling`'s
+  `joinLabelsWithFeatures`) rather than one row per label — a point label's
+  output is unchanged.
+
 ## Non-CLI contract: `@homecsi/web`
 
 Not wired into `packages/cli` — `@homecsi/api`'s `startServer` is expected

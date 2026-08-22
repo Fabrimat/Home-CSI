@@ -72,4 +72,39 @@ describe('createInMemoryLabelStore', () => {
     const labels = await store.listLabels(session.id);
     expect(labels.map((l) => l.timeMs)).toEqual([1000, 2000]);
   });
+
+  it('addLabel defaults to a point label (endTimeMs null) with source "manual" when omitted', async () => {
+    const store = createInMemoryLabelStore();
+    const session = await store.createSession(0, null);
+    const label = await store.addLabel(session.id, 1000, 1, null);
+    expect(label.endTimeMs).toBeNull();
+    expect(label.source).toBe('manual');
+  });
+
+  it('addLabel stores an explicit interval end and source', async () => {
+    const store = createInMemoryLabelStore();
+    const session = await store.createSession(0, null);
+    const label = await store.addLabel(session.id, 1000, 2, 'correction', 5000, 'confirmed');
+    expect(label.endTimeMs).toBe(5000);
+    expect(label.source).toBe('confirmed');
+
+    const [fetched] = await store.listLabels(session.id);
+    expect(fetched?.endTimeMs).toBe(5000);
+    expect(fetched?.source).toBe('confirmed');
+  });
+
+  it('setLabelEndTime updates an existing label in place and throws for an unknown label', async () => {
+    const store = createInMemoryLabelStore();
+    const session = await store.createSession(0, null);
+    const label = await store.addLabel(session.id, 1000, 1, null);
+    expect(label.endTimeMs).toBeNull();
+
+    const updated = await store.setLabelEndTime(label.id, 4000);
+    expect(updated.endTimeMs).toBe(4000);
+
+    const [fetched] = await store.listLabels(session.id);
+    expect(fetched?.endTimeMs).toBe(4000);
+
+    await expect(store.setLabelEndTime(999, 1)).rejects.toThrow(/no label/);
+  });
 });
