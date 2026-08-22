@@ -116,3 +116,175 @@ shape:
   for the 0-vs-1+ v1 success criterion; a trained model would primarily
   target the 2+ stretch goal and refine confidence, not replace the
   motion-integration logic wholesale.
+
+## Web dashboard
+
+The primary purpose of a production dashboard is to close the feedback loop
+that trains the future model described in "Trained-model inference" above.
+v1 ships a **debug UI** (`server/packages/web` + `server/packages/api`,
+owned by brief B5) accessible over HTTPS with bearer-token auth. This debug
+UI is the seed of a full dashboard; its occupancy timeline and labelling
+session controls form the core of human-in-the-loop correction and training
+ground truth collection.
+
+**What the debug UI does today (the foundation):**
+
+Real-time occupancy state (latch state machine output), node liveness
+tracking, live CSI waterfall visualization, per-node and per-link health
+status, extracted CSI features, application log tail. For occupancy history,
+it renders the latched state machine's transitions over a user-selectable
+time window (1h/6h/24h/7d) with optional ground-truth label overlay from
+labeling sessions. It includes session start/stop controls and per-moment
+annotation (occupancy count + free-text notes), allowing the operator to
+mark the system's output as correct or incorrect, confirm stretches it got
+right, and attach context notes — no per-room or per-link drill-down yet.
+A separate **training mode** view (below) covers the live, guided
+cold-start flow rather than after-the-fact correction.
+
+**The feedback loop: correction as the primary interaction.**
+
+An operator reviewing the occupancy timeline does three things:
+1. **Mark stretches the system got wrong** — "it said empty, but we were
+   home" or "it said 2+, but it was just me" — by selecting a time range,
+   recording the true occupancy count (0, 1, or 2+), and optionally a
+   note describing the context. Each correction is a `labels` row
+   (time, occupancy_count, notes) within a `label_sessions` session
+   (brief B4's schema, migration 002).
+2. **Confirm stretches it got right** — equally valuable training signal,
+   preventing the model from learning that any default guess is safe. A
+   confirmation is the same `labels` row: "at this time, occupancy was
+   indeed 1", with no implication that it was wrong.
+3. **Add context notes** — "guests just arrived", "still asleep", "all in
+   one room" — attached to individual labels or the session as a whole,
+   captured in the free-text `notes` column for later inspection and
+   model conditioning.
+
+The debug UI today already ships these controls; a dashboard extends them
+with better UX (multi-select ranges, bulk operations), richer context
+(room-by-room drill-down), and persistence across sessions (historical
+comparison, previous corrections).
+
+**Training mode for cold-start bootstrap.**
+
+Before any trained model exists, the system needs a labelled corpus to
+train on. The debug UI ships a **training mode** view
+(`server/packages/web/ui/src/views/training.ts`, brief B14) for exactly
+that cold start: a guided flow where the operator walks through the house
+live, declaring ground truth as they move. This is a deliberately separate
+tool from the point-in-time manual annotation controls in
+`views/recording.ts` — the two are not merged. Training mode's own intro
+text points operators at the Occupancy timeline view for reviewing or
+correcting past predictions, and names Recording controls as the simpler
+point-in-time annotation tool it is. Neither of those two views carries a
+pointer back to training mode.
+
+- **Starts a training session** with no prior data, just a clear
+  declaration of "house empty" / "just me" / "two or more of us" (the
+  0/1/2+ scale; see `docs/architecture.md` "Motion, not people" — this is
+  not a per-window people-counter, it is a state for coarse occupancy).
+  The session's notes are marked with a distinct `[training]` prefix so
+  reloading the view (e.g. after a phone lock mid-walk) finds and offers to
+  resume an already-open training session, rebuilt from the server, rather
+  than orphaning it.
+- **Declares occupancy state transitions in real time** as the operator
+  moves through the house: tapping the current state first closes the
+  previously open declaration (`PATCH /api/labels/:id`, end_time only) and
+  then opens the next one (`POST /api/labels`) at the same instant, so
+  declared intervals abut with no gap and no overlap. If closing the
+  previous declaration fails, the new one is not opened. Tapping the
+  already-declared state is a no-op, not a zero-length interval.
+- **A free-text context note, plus an optional one-tap still/moving
+  toggle,** is carried onto the next declaration, to help a future model
+  separate "person present but motionless" from "person moving" — the
+  hardest distinction in this system (`docs/architecture.md` "Motion, not
+  people").
+- **Stopping** the session closes any open declaration and then stops the
+  session (`POST /api/labels/sessions/:id/stop`). A `preservationWarning`
+  in that response — meaning the labels were recorded but the underlying
+  raw per-link features could not be archived into `training_features` —
+  is rendered as a distinct warning, never silently dropped.
+
+This produces a first labelled corpus in a single guided walk, dense and
+low-ambiguity by construction, enough to bootstrap training once replayable
+features exist for the labelled window (see `docs/architecture.md` Data
+lifecycle, captures stay 7 days). Later, continuous operator feedback
+(corrections of prediction mistakes, via the correction/confirmation panel
+on the occupancy timeline, `views/occupancy.ts`) refines the model
+incrementally. The **trained model itself** remains future work (see
+"Trained-model inference" above): training mode builds the labelled
+corpus, it does not train anything.
+
+**Integration constraint: manual sessions only, no weak labels.**
+
+Dashboard-created labelling sessions — the correction/confirmation panel on
+the occupancy timeline (`views/occupancy.ts`), the manual annotation
+controls in `views/recording.ts`, and training mode (`views/training.ts`)
+— are never weak-flagged.
+`packages/labeling/src/trainingPreservation.ts` preserves raw per-link
+feature rows to `training_features` (the permanent training archive) **only
+for non-weak sessions**, not weak/automatic ones. Weak labels (like the
+`label presence probe` cron for passive phone presence) are deliberately
+excluded — an always-on weak cron would otherwise cause
+`training_features` to balloon unbounded, defeating the retention policy
+(`features` is 7-day ephemeral; only human-validated windows get promoted
+to permanent training storage). If the dashboard created weak-flagged
+sessions, their underlying features would silently evaporate after 7 days,
+poisoning the training set. Sessions created via the dashboard have their
+`notes` field checked against the weak-label prefix
+`[weak:phone-presence]` and never start with it — the existence of any
+other note at all (or `null`) marks them as non-weak.
+
+Labels also carry an explicit `source` column (migration 008) recording how
+each one was produced: the correction/confirmation UI writes
+`'manual'`/`'confirmed'`, training mode writes `'training'`, and the
+phone-presence cron writes `'weak:phone-presence'`. A future training run
+can weight or filter examples by this provenance, not just by which session
+they happened to land in.
+
+**The 7-day deadline: a real UX constraint.**
+
+Raw per-link CSI features have a 7-day retention policy (migration 007). A
+window's raw features survive longer only if preserved to `training_features`
+before they age out. The dashboard must surface this deadline explicitly:
+
+- Show which stretches of the occupancy timeline are still **correctable**
+  (features present, can be preserved) vs. **past deadline** (features
+  likely gone, correction possible but no underlying data to attach to
+  training — correction is recorded in the labels table but the model will
+  have less signal from that window).
+- The occupancy prediction itself lasts indefinitely (separate `occupancy_states`
+  table, kept forever), but the features needed to improve model performance
+  from that window evaporate in 7 days. This is honest: a user might mark a
+  prediction as wrong weeks later, but the raw training material is gone.
+- Operationally: feedback delays longer than ~7 days have diminishing value.
+  A deployment should aim to review corrections weekly, at minimum.
+
+**Occupancy data is a sparse event log.**
+
+v1's occupancy output is not a dense 2 Hz sample stream — it is transitions
+(state changes) plus periodic keepalive records written at rest. A dashboard
+must render it **step-wise / last-value-carried-forward** (the step line
+connects one transition to the next, with the estimate held constant in
+between) and must **never assume evenly-spaced samples** — this will break
+any line-chart code that assumes density and tries to interpolate or smooth.
+
+**Auth is bearer-token-only.**
+
+`server.apiToken` from `config.yaml` gates all API routes; there is no
+anonymous read access in v1. Dashboard feedback/training data is not
+intended to be exposed publicly (it is the system's learning surface). A
+production dashboard would live at the same origin as the API and inherit
+this auth model. If a future multi-tenant shape emerges (multiple homes in a
+single deployment), auth would need to layer on per-home tokens or
+per-home-per-user RBAC, but that is out of scope for single-home v1.
+
+**Architecture and scope.**
+
+The UI is deliberately owned by the same brief (B5, api/web) and both
+operate in-process under the same HTTP server. A dashboard could stay there
+(adding more views and drill-down endpoints to the API) or migrate to a
+separate frontend on the same-origin, making the API more general-purpose
+for client-side consumption — deferred until the UX and query patterns are
+clearer. The labeling and training infrastructure (`@homecsi/labeling`, brief
+B4) already handles persistence to the database and feature preservation; the
+dashboard is the human interface atop that.
