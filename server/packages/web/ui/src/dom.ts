@@ -55,11 +55,7 @@ export function formatRelative(iso: string | null): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-/** Renders a message in place of a chart/table when there is genuinely no data — never a placeholder graphic. */
-export function emptyState(message: string): HTMLElement {
-  return h('div', { class: 'empty-state' }, message);
-}
-
-export function errorState(message: string): HTMLElement {
-  return h('div', { class: 'error-state' }, `Error: ${message}`);
-}
+// loadingState / emptyState / errorState moved to ./components/asyncState.ts
+// (brief B18) -- they are shared view-level components, not generic DOM
+// helpers, and every view imports the trio together to keep the loading /
+// empty / error convention consistent (see that file's doc comment).

@@ -1,5 +1,6 @@
 import { apiGet, apiPatch, apiPost, ApiError } from '../api.js';
 import { clear, h } from '../dom.js';
+import { statusMessage } from '../components/statusMessage.js';
 
 /**
  * Guided live-walkthrough training mode (docs/roadmap.md "Training mode for
@@ -101,12 +102,6 @@ function formatIntervalSpan(row: LabelRow): string {
 
 type Banner = { kind: 'info' | 'warning' | 'error'; text: string } | null;
 
-const BANNER_COLOR: Record<NonNullable<Banner>['kind'], string> = {
-  info: 'var(--accent)',
-  warning: 'var(--warn)',
-  error: 'var(--bad)',
-};
-
 export function renderTraining(container: HTMLElement): () => void {
   let disposed = false;
   const root = h('div', { class: 'view-scroll' });
@@ -195,8 +190,14 @@ export function renderTraining(container: HTMLElement): () => void {
       return;
     }
     bannerEl.style.display = '';
-    bannerEl.setAttribute('style', `border-color: ${BANNER_COLOR[banner.kind]}; color: ${banner.kind === 'error' ? BANNER_COLOR.error : 'var(--text)'};`);
-    bannerEl.append(h('strong', {}, banner.kind === 'warning' ? 'Warning: ' : banner.kind === 'error' ? 'Error: ' : ''), banner.text);
+    // Delegates to the shared statusMessage component (brief B18) for both
+    // the visual severity styling AND the screen-reader announcement --
+    // this banner reports session lifecycle outcomes (started/resumed/
+    // stopped/failed), which is exactly the kind of one-off action-result
+    // feedback that must not be visual-only. 'warning' here maps to the
+    // component's 'warn' kind; the type names differ (this file predates
+    // the shared component) but are otherwise the same severity.
+    bannerEl.append(statusMessage(banner.kind === 'warning' ? 'warn' : banner.kind, banner.text, true));
   }
 
   function setMotionTag(tag: MotionTag): void {

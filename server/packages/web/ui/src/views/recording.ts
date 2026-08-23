@@ -1,5 +1,6 @@
 import { apiGet, apiPost, ApiError } from '../api.js';
-import { clear, emptyState, errorState, formatTimestamp, h } from '../dom.js';
+import { clear, formatTimestamp, h } from '../dom.js';
+import { emptyState, errorState, loadingState } from '../components/asyncState.js';
 
 interface LabelSessionRow {
   id: number;
@@ -54,6 +55,7 @@ export function renderRecording(container: HTMLElement): () => void {
     ),
     sessionsPanel,
   );
+  sessionsPanel.append(loadingState('Loading sessions…'));
 
   async function startSession(): Promise<void> {
     try {

@@ -1,5 +1,6 @@
 import { apiGet, ApiError } from '../api.js';
-import { clear, emptyState, errorState, formatRelative, h } from '../dom.js';
+import { clear, formatRelative, h } from '../dom.js';
+import { emptyState, errorState, loadingState } from '../components/asyncState.js';
 
 interface NodeLiveness {
   id: number;
@@ -56,6 +57,13 @@ export function renderHealth(container: HTMLElement): () => void {
   let disposed = false;
   const root = h('div', { class: 'view-scroll' });
   container.append(root);
+  root.append(loadingState('Loading node & link health…'));
+
+  // See the identical comment in views/overview.ts: this view also polls
+  // (POLL_INTERVAL_MS), so an unchanged error must not re-announce on every
+  // tick. Reset on every successful fetch so recovery renders real content
+  // and a later, distinct recurrence of the same message announces again.
+  let lastErrorMessage: string | null = null;
 
   async function loadLatestHeartbeat(nodeId: number): Promise<HeartbeatRow | null> {
     const to = new Date();
@@ -82,10 +90,14 @@ export function renderHealth(container: HTMLElement): () => void {
       links = linksRes.links;
     } catch (err) {
       if (disposed) return;
+      const message = err instanceof ApiError ? err.message : String(err);
+      if (message === lastErrorMessage) return;
+      lastErrorMessage = message;
       clear(root);
-      root.append(errorState(err instanceof ApiError ? err.message : String(err)));
+      root.append(errorState(message));
       return;
     }
+    lastErrorMessage = null;
 
     const heartbeats = await Promise.all(nodes.map((n) => loadLatestHeartbeat(n.id)));
     if (disposed) return;

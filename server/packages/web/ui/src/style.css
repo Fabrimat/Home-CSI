@@ -38,6 +38,28 @@ a {
   color: var(--accent);
 }
 
+/* Skip link: off-screen until it receives keyboard focus, then pinned to
+   the top-left corner above everything else -- the standard pattern so it
+   never occupies layout space for a mouse/sighted user who never tabs to
+   it, but is unmistakable for the keyboard user who does. */
+.skip-link {
+  position: absolute;
+  top: -3rem;
+  left: 0.5rem;
+  z-index: 100;
+  background: var(--accent);
+  color: #001018;
+  font-weight: 600;
+  padding: 0.5rem 0.9rem;
+  border-radius: 0 0 8px 8px;
+  text-decoration: none;
+  transition: top 0.1s ease-out;
+}
+
+.skip-link:focus-visible {
+  top: 0;
+}
+
 header.app-header {
   display: flex;
   align-items: center;
@@ -54,11 +76,37 @@ header.app-header h1 {
   white-space: nowrap;
 }
 
+/* Grouped nav (brief B18): three `.tab-group`s -- live monitoring / analysis
+   / ground truth -- laid out in one row on wide viewports, separated by a
+   hairline divider and a small uppercase caption per group instead of one
+   undifferentiated row of eight links. See the 640px breakpoint below for
+   how this collapses on a phone. */
 nav.tabs {
   display: flex;
-  gap: 0.25rem;
+  align-items: center;
+  gap: 0.9rem;
   overflow-x: auto;
   flex: 1;
+}
+
+.tab-group {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.tab-group + .tab-group {
+  padding-left: 0.9rem;
+  border-left: 1px solid var(--border);
+}
+
+.tab-group-label {
+  color: var(--text-dim);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  margin-right: 0.35rem;
 }
 
 nav.tabs a {
@@ -291,6 +339,15 @@ th {
   background: rgba(245, 97, 92, 0.08);
 }
 
+/* Neutral fourth variant (training view's session-lifecycle banner --
+   "session started", "resumed session #3" -- informational, not a
+   judgement about correctness like ok/warn/error). */
+.correction-message.info {
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: rgba(93, 200, 250, 0.08);
+}
+
 .controls button:focus-visible,
 nav.tabs a:focus-visible,
 select:focus-visible,
@@ -298,6 +355,20 @@ input:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Loading / empty / error must never be mistakable for one another (brief
+   B18 -- see components/asyncState.ts): a solid neutral border on a raised
+   panel background for "still working", a dashed border for "done, and
+   there's genuinely nothing here", and a red border/tint for "this failed".
+   None of the three can be confused with an ordinary loaded panel either. */
+.loading-state {
+  color: var(--text-dim);
+  padding: 1.5rem;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
 }
 
 .empty-state {
@@ -374,5 +445,37 @@ canvas {
   }
   header.app-header h1 {
     display: none;
+  }
+
+  /* The three-group nav stacks into three short, labelled rows instead of
+     one long horizontally-scrolling strip of eight links. This matters
+     concretely on this narrow a screen: the operator running training mode
+     is on a phone, walking through the house one-handed, and a stacked,
+     recognizable "Live monitoring / Analysis / Ground truth" is something
+     a thumb can hit without hunting sideways through a scroll strip first. */
+  header.app-header {
+    flex-wrap: wrap;
+  }
+
+  nav.tabs {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+    width: 100%;
+  }
+
+  .tab-group {
+    overflow-x: auto;
+  }
+
+  .tab-group + .tab-group {
+    padding-left: 0;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding-top: 0.35rem;
+  }
+
+  .tab-group-label {
+    margin-right: 0.5rem;
   }
 }

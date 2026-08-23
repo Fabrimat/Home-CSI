@@ -1,5 +1,6 @@
 import { apiGet, ApiError } from '../api.js';
-import { clear, emptyState, errorState, h } from '../dom.js';
+import { clear, h } from '../dom.js';
+import { emptyState, errorState, loadingState } from '../components/asyncState.js';
 import { viridis } from '../colormap.js';
 import { liveSocket, type LiveDataMessage } from '../ws.js';
 
@@ -69,6 +70,7 @@ export function renderWaterfall(container: HTMLElement): () => void {
     ),
     chartArea,
   );
+  chartArea.append(loadingState('Loading available links…'));
 
   let links: LinkSummary[] = [];
   let columns: CsiPoint[] = [];
@@ -223,13 +225,13 @@ export function renderWaterfall(container: HTMLElement): () => void {
     clear(linkSelect);
     if (links.length === 0) {
       linkSelect.append(h('option', { value: '' }, 'no links observed recently'));
-      renderChart();
-      return;
+    } else {
+      linkSelect.append(
+        h('option', { value: '' }, 'select a link…'),
+        ...links.map((l) => h('option', { value: linkKey(l) }, linkLabel(l))),
+      );
     }
-    linkSelect.append(
-      h('option', { value: '' }, 'select a link…'),
-      ...links.map((l) => h('option', { value: linkKey(l) }, linkLabel(l))),
-    );
+    renderChart();
   }
 
   linkSelect.addEventListener('change', () => {
@@ -244,7 +246,6 @@ export function renderWaterfall(container: HTMLElement): () => void {
   });
 
   void loadLinks();
-  renderChart();
 
   return () => {
     disposed = true;

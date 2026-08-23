@@ -1,5 +1,6 @@
 import { apiGet, ApiError } from '../api.js';
-import { clear, emptyState, errorState, formatRelative, h } from '../dom.js';
+import { clear, formatRelative, h } from '../dom.js';
+import { emptyState, errorState, loadingState } from '../components/asyncState.js';
 import {
   currentRunStartMs,
   formatDuration,
@@ -61,6 +62,19 @@ export function renderOverview(container: HTMLElement): () => void {
   let disposed = false;
   const root = h('div', { class: 'view-scroll' });
   container.append(root);
+  root.append(loadingState('Loading status…'));
+
+  // Tracks the message currently shown by errorState() below. This view
+  // polls every POLL_INTERVAL_MS: without this, an outage that persists
+  // across many ticks would clear() + re-append a brand new role="alert"
+  // node every single tick, re-announcing the SAME failure to a screen
+  // reader every few seconds for as long as the outage lasts. A genuinely
+  // different failure message (e.g. a network error giving way to a 401)
+  // still replaces the node and announces fresh -- the guard compares text,
+  // not "is an error currently showing". Reset to null on every successful
+  // fetch, so recovery always re-renders real content, and a later
+  // recurrence of the same message (a new, distinct outage) announces again.
+  let lastErrorMessage: string | null = null;
 
   async function load(): Promise<void> {
     let status: StatusSummary;
@@ -68,10 +82,14 @@ export function renderOverview(container: HTMLElement): () => void {
       status = await apiGet<StatusSummary>('/api/status');
     } catch (err) {
       if (disposed) return;
+      const message = err instanceof ApiError ? err.message : String(err);
+      if (message === lastErrorMessage) return;
+      lastErrorMessage = message;
       clear(root);
-      root.append(errorState(err instanceof ApiError ? err.message : String(err)));
+      root.append(errorState(message));
       return;
     }
+    lastErrorMessage = null;
 
     let nodes: NodeLiveness[] = [];
     let history: OccupancyRow[] = [];

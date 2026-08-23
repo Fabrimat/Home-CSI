@@ -1,5 +1,7 @@
 import { apiGet, apiPost, ApiError } from '../api.js';
-import { clear, emptyState, errorState, formatTimestamp, h } from '../dom.js';
+import { clear, formatTimestamp, h } from '../dom.js';
+import { emptyState, errorState, loadingState } from '../components/asyncState.js';
+import { statusMessage } from '../components/statusMessage.js';
 import {
   buildStepSegments,
   currentRunStartMs,
@@ -193,6 +195,7 @@ export function renderOccupancy(container: HTMLElement): () => void {
     chartArea,
     selectionPanel,
   );
+  chartArea.append(h('h2', {}, 'Occupancy timeline'), loadingState('Loading occupancy history…'));
 
   // --- Selection plumbing --------------------------------------------------
 
@@ -265,29 +268,26 @@ export function renderOccupancy(container: HTMLElement): () => void {
     // classifySelectionRetention (labelRanges.ts).
     const retentionStatus = classifySelectionRetention(retentionAvailability, selection.fromMs, selection.toMs, Date.now());
     if (retentionStatus === 'loading') {
-      correctionBody.append(h('p', { class: 'sub' }, 'Checking retention status…'));
+      correctionBody.append(loadingState('Checking retention status…'));
     } else if (retentionStatus === 'unavailable') {
       correctionBody.append(
-        h(
-          'div',
-          { class: 'correction-message warn' },
+        statusMessage(
+          'warn',
           'Retention status unknown (could not reach /api/config) -- this selection may be past the point where its raw features can be preserved for training.',
         ),
       );
     } else if (retentionStatus === 'past-deadline' && retentionAvailability.status === 'loaded') {
       correctionBody.append(
-        h(
-          'div',
-          { class: 'correction-message warn' },
+        statusMessage(
+          'warn',
           `Past the ${formatRetentionDuration(retentionAvailability.config.retentionMaxAgeMs)} debug window: this selection's raw per-link features are likely already gone. ` +
             'The correction will still be recorded, but it cannot be preserved into the permanent training set.',
         ),
       );
     } else if (retentionStatus === 'approaching' && retentionAvailability.status === 'loaded') {
       correctionBody.append(
-        h(
-          'div',
-          { class: 'correction-message warn' },
+        statusMessage(
+          'warn',
           `Approaching the ${formatRetentionDuration(retentionAvailability.config.retentionMaxAgeMs)} debug window (within ${formatRetentionDuration(retentionAvailability.config.retentionSafetyMarginMs)} of the edge) -- correct this stretch soon if you want its raw features preserved.`,
         ),
       );
@@ -340,7 +340,12 @@ export function renderOccupancy(container: HTMLElement): () => void {
     );
 
     if (lastResult) {
-      correctionBody.append(h('div', { class: `correction-message ${lastResult.kind}` }, lastResult.text));
+      // Announced to assistive tech via statusMessage's role/politeness
+      // logic (components/statusMessage.ts) -- this is the one place a
+      // `preservationWarning` (kind 'warn') surfaces, and it must not be
+      // visual-only: a screen reader user submitting a correction has no
+      // other way to learn the raw features could not be preserved.
+      correctionBody.append(statusMessage(lastResult.kind, lastResult.text));
     }
   }
 

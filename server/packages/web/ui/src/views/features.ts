@@ -1,5 +1,6 @@
 import { apiGet, ApiError } from '../api.js';
-import { clear, emptyState, errorState, formatTimestamp, h } from '../dom.js';
+import { clear, formatTimestamp, h } from '../dom.js';
+import { emptyState, errorState, loadingState } from '../components/asyncState.js';
 
 interface LinkSummary {
   nodeId: number;
@@ -127,6 +128,7 @@ export function renderFeatures(container: HTMLElement): () => void {
   const linkSelect = h('select', { 'aria-label': 'Link' }) as HTMLSelectElement;
   const chartArea = h('div', { class: 'grid' });
   root.append(h('div', { class: 'controls' }, h('label', {}, 'Link', linkSelect)), chartArea);
+  chartArea.append(loadingState('Loading available links…'));
 
   let links: LinkSummary[] = [];
 
@@ -190,10 +192,14 @@ export function renderFeatures(container: HTMLElement): () => void {
     clear(linkSelect);
     if (links.length === 0) {
       linkSelect.append(h('option', { value: '' }, 'no links observed recently'));
-      void load();
-      return;
+    } else {
+      linkSelect.append(h('option', { value: '' }, 'select a link…'), ...links.map((l) => h('option', { value: linkKey(l) }, `node ${l.nodeId}: ${l.srcMac}`)));
     }
-    linkSelect.append(h('option', { value: '' }, 'select a link…'), ...links.map((l) => h('option', { value: linkKey(l) }, `node ${l.nodeId}: ${l.srcMac}`)));
+    // Either branch leaves chartArea showing the "Loading available links…"
+    // placeholder from mount time until this runs -- replace it with the
+    // real prompt (or the empty-links message) rather than leaving a stale
+    // loading state up once links.length > 0 and no link is selected yet.
+    void load();
   }
 
   linkSelect.addEventListener('change', () => void load());
