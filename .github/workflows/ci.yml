@@ -1,0 +1,90 @@
+name: CI
+
+# Triggers: push to main, pull requests targeting main, and manual dispatch
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Principle of least privilege: neither job writes anything (no push, comment,
+# publish, or tag operations). An explicit permissions block ensures the
+# workflow's blast radius is not silently widened if the repository's default
+# GITHUB_TOKEN permission setting is ever changed.
+permissions:
+  contents: read
+
+jobs:
+  server:
+    # TypeScript/npm workspaces monorepo: build, typecheck, lint, test
+    # CLAUDE.md requires all four gates to pass at all times on main.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          # Cache npm dependencies via package-lock.json at server/ (the npm
+          # workspaces root). This is populated by npm ci, not install, to
+          # ensure reproducible builds from lock file.
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: npm ci
+        working-directory: server
+        run: npm ci
+
+      - name: npm run build
+        working-directory: server
+        run: npm run build
+
+      - name: npm run typecheck
+        working-directory: server
+        run: npm run typecheck
+
+      - name: npm run lint
+        working-directory: server
+        run: npm run lint
+
+      - name: npm run test
+        working-directory: server
+        run: npm run test
+
+  docker:
+    # Build the deployment image and validate the compose file.
+    # The brief forbids a Postgres service container: CLAUDE.md requires npm
+    # test to never need live infrastructure. The four live-DB tests skip
+    # cleanly when their env var is unset. That is the intended CI behaviour.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy .env.example to .env
+        # docker compose config interpolates ${POSTGRES_DB} and friends.
+        # Without .env, they become empty strings and validation is degraded.
+        # We use .env.example as the source to validate the shape with
+        # realistic values, not a blank/template file.
+        run: cp ops/.env.example ops/.env
+
+      - name: Build Docker image
+        # Build from repo root (the build context must be the repo root).
+        # ops/Dockerfile documents at length why: it needs to COPY server/
+        # and firmware/ into the image, which only works if the context is
+        # the repo root. ops/docker-compose.yml sets build.context: .. for
+        # the same reason.
+        run: docker build -f ops/Dockerfile .
+
+      - name: Validate docker-compose.yml
+        run: docker compose -f ops/docker-compose.yml config
