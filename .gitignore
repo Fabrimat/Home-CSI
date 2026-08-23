@@ -42,3 +42,13 @@ Thumbs.db
 # Vite build output for the debug UI (built by ops/Dockerfile and
 # `npm run build --workspace=@homecsi/web`; never committed).
 ui-dist/
+
+# --- ops: filled-in operator secrets ---
+# ops/config.yaml is the operator's real copy of
+# ops/config.production.example.yaml — holds per-node PSKs and (briefly,
+# as schema-valid placeholders that get overridden by ops/.env at deploy
+# time) other config. Never commit a filled-in copy. The *.example.yaml
+# templates themselves are intentionally tracked.
+ops/config.yaml
+ops/config*.yaml
+!ops/config*.example.yaml

@@ -1,0 +1,34 @@
+[Unit]
+Description=Home CSI - nightly TimescaleDB backup (ops/backup.sh, one-shot)
+Documentation=https://github.com/ (see docs/deployment.md "Backup and restore")
+
+# This unit is for operators running the Docker COMPOSE deployment
+# (ops/docker-compose.yml) who prefer a systemd timer over a host crontab
+# entry for scheduling ops/backup.sh - it is unrelated to, and does not
+# require, the systemd/non-Docker server deployment path documented in
+# ops/systemd/README.md (that path's own backup approach is a plain
+# `pg_dump` with no `docker compose` wrapping - see that README's
+# "Backups" section). Triggered by homecsi-backup.timer - not enabled or
+# started directly.
+
+# Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Intentionally no `User=` (runs as root): ops/backup.sh shells out to
+# `docker compose exec`, which needs whatever privilege this host grants
+# for that command (root, or membership in the `docker` group) - this
+# mirrors docs/deployment.md's crontab example, which likewise assumes
+# "a user with access to docker compose in ops/", not the unrelated
+# `homecsi` non-root user the ingest/api systemd units run as.
+# Matches the Docker path's clone target (docs/deployment.md step 4:
+# `git clone <repo-url> /opt/homecsi`), NOT the systemd/non-Docker path's
+# `/opt/homecsi/repo` layout (ops/systemd/README.md step 2) - if you cloned
+# somewhere else, edit both lines below to match.
+WorkingDirectory=/opt/homecsi/ops
+ExecStart=/opt/homecsi/ops/backup.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homecsi-backup

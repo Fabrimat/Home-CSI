@@ -28,8 +28,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=homecsi-ingest
 
-# Hardening (defense in depth; adjust ReadWritePaths to match
-# HOMECSI_DATA_DIR in /etc/homecsi/homecsi.env).
+# Hardening (defense in depth; adjust ReadWritePaths to match wherever
+# config.yaml's storage.captureDir / logging.file.path actually point -
+# see ops/systemd/README.md step 3. Unlike the Docker path, there is no
+# HOMECSI_DATA_DIR variable on this path to keep in sync with.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

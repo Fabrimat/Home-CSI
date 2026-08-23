@@ -6,7 +6,7 @@
  * live in the YAML file. Values are always strings here; zod's `coerce`
  * schemas (see schema.ts) turn them into numbers/booleans as needed.
  */
-const ENV_VAR_PATHS: ReadonlyArray<{ envVar: string; path: readonly string[] }> = [
+export const ENV_VAR_PATHS: ReadonlyArray<{ envVar: string; path: readonly string[] }> = [
   { envVar: 'HOMECSI_SERVER_UDP_HOST', path: ['server', 'udp', 'host'] },
   { envVar: 'HOMECSI_SERVER_UDP_PORT', path: ['server', 'udp', 'port'] },
   { envVar: 'HOMECSI_SERVER_HTTP_HOST', path: ['server', 'http', 'host'] },

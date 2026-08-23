@@ -3,8 +3,10 @@
 This is the end-to-end operator runbook for deploying Home CSI: a VPS, a
 dedicated WiFi AP, and a handful of ESP32 nodes. It assumes the Docker path
 (`ops/docker-compose.yml`) as primary; see `ops/systemd/README.md` for the
-non-Docker alternative — the operational sections below (backup, disk
-management, troubleshooting) apply to both.
+non-Docker alternative — the operational *concepts* below (backup, disk
+management, troubleshooting) apply to both, though some commands are
+Docker-path-specific (`ops/backup.sh` in particular; the systemd README's
+own "Backups" section has the non-Docker equivalent).
 
 Related documents: `docs/protocol.md` (wire format), `docs/architecture.md`
 (system design), `ops/ap-checklist.md` (AP configuration),
@@ -102,6 +104,11 @@ and come back to this doc for the operational sections.
 ## 4. Clone the repo onto the VPS
 
 ```sh
+# /opt is root-owned on a fresh VPS - create the target directory and
+# hand it to your own (non-root) user before cloning into it, or the
+# clone itself fails with a permission error.
+sudo mkdir -p /opt/homecsi
+sudo chown "$(id -u):$(id -g)" /opt/homecsi
 git clone <repo-url> /opt/homecsi
 cd /opt/homecsi
 ```
@@ -113,26 +120,90 @@ cp ops/.env.example ops/.env
 ```
 
 Edit `ops/.env` and set real values for `POSTGRES_PASSWORD`,
-`HOMECSI_API_TOKEN`, `HOMECSI_DOMAIN`, `HOMECSI_ACME_EMAIL`, and
-`HOMECSI_DATA_DIR` (create that directory on the host first, e.g.
-`sudo mkdir -p /srv/homecsi/data/{captures,logs,db}`). See the comments in
-`ops/.env.example` for how to generate strong secrets. **Never commit this
-file** — it's git-ignored, keep it that way.
+`HOMECSI_SERVER_API_TOKEN`, `HOMECSI_DOMAIN`, `HOMECSI_ACME_EMAIL`, and
+`HOMECSI_DATA_DIR`. See the comments in `ops/.env.example` for how to
+generate strong secrets. **Never commit this file** — it's git-ignored,
+keep it that way.
+
+Then create and own that directory on the host:
+
+```sh
+sudo mkdir -p /srv/homecsi/data/{captures,logs,backups}
+sudo chown -R 10001:10001 /srv/homecsi/data/captures /srv/homecsi/data/logs
+```
+
+(No `db` subdirectory — `timescaledb` stores its data in the named Docker
+volume `timescaledb_data`, not a bind mount under `HOMECSI_DATA_DIR`; a
+`db/` directory here would just sit empty.)
+
+The `chown` matters, not just `mkdir`: `ingest`/`api`/`label-preserve`
+all run as the fixed non-root UID `10001` (see `ops/Dockerfile`), and
+both `captures/` (`ingest` writes raw CSI shards there —
+`server/packages/storage/src/captureWriter.ts`) and `logs/` (the
+application log file — `server/packages/ingest/src/logger.ts`) need to
+actually be writable by that UID. A root-owned, default-mode directory
+from a plain `mkdir` looks fine until the container tries to create its
+first file in it and gets `EACCES` — `ingest` then crash-loops at step 9.
+`backups/` is intentionally left root-owned: `ops/backup.sh` (and its
+systemd/cron scheduling) runs as root, not as the container's UID `10001`
+— see "Backup and restore" below.
 
 ## 6. Generate per-node keys
 
-See "Key management" below. Do this before first bringing nodes online;
-each node needs its key flashed before it can send anything the server will
-accept.
+See "Key management" below. Do this before the next step; you'll paste
+these keys straight into `config.yaml`.
 
-## 7. Configure DNS
+## 7. Fill in `config.yaml`
+
+`.env` alone is not a complete deployment: the per-node PSK registry and
+the application log file path have no environment-variable override (see
+`server/packages/config/src/env.ts`), so a real config file is mandatory
+regardless of anything set in `.env`.
+
+```sh
+cp ops/config.production.example.yaml ops/config.yaml
+```
+
+Edit `ops/config.yaml` and fill in the `nodes:` list with the keys from
+step 6 — one entry per physical node, each with its own `id`, `name`,
+`room`, and `psk` (base64), **never reusing a PSK across nodes** (see that
+file's own header comment, and "Key management" below, for why reuse
+breaks the wire protocol's nonce-uniqueness guarantee outright, not just
+mildly). Leave `server.apiToken` and `database.password` as the
+placeholders already in the template — those two come from `ops/.env`
+instead (see the template's header for exactly which env vars). Then:
+
+```sh
+chmod 600 ops/config.yaml
+sudo chown 10001:10001 ops/config.yaml
+```
+
+`600` because it now holds real key material; `10001:10001` because that
+is the fixed, non-root UID/GID `ops/Dockerfile` assigns its runtime user
+(pinned specifically so this `chown` target is stable across image
+rebuilds) — without it, the container cannot read a mode-600 file owned
+by a different host UID. `chown` to a UID that isn't your own login user
+requires `sudo` - a plain `chown` here fails with `EPERM` for a normal
+operator, which would otherwise look like nothing happened (still your
+own UID, still mode 600) right up until every CLI container fails to
+read the file. `ops/config.yaml` is git-ignored (see repo-root
+`.gitignore`); **never commit a filled-in copy, in any form.** One
+consequence of the `chown`: editing this file again later (e.g. to add a
+node) needs `sudo` too, since it is no longer owned by your login user.
+
+`ops/docker-compose.yml` bind-mounts this file read-only into every
+service that runs the CLI, at `/etc/homecsi/config.yaml`, and sets
+`HOMECSI_CONFIG_PATH` accordingly — you do not need to do anything further
+for the containers to find it.
+
+## 8. Configure DNS
 
 Point an A record (and AAAA, if the VPS has IPv6) for `HOMECSI_DOMAIN` at
 the VPS's public IP. Confirm it resolves (`dig +short your.domain`) before
 starting Caddy — Let's Encrypt issuance will fail (and can trigger rate
 limits on repeated failure) against a domain that doesn't resolve yet.
 
-## 8. Bring the stack up
+## 9. Bring the stack up
 
 ```sh
 cd ops
@@ -141,9 +212,11 @@ docker compose up -d
 
 This builds the server image (see `ops/Dockerfile`), starts `timescaledb`,
 waits for it to report healthy, then runs `migrate` to completion before
-`ingest` and `api` start, then starts `caddy` last (it depends on `api`).
+`ingest`, `api`, and `label-preserve` start, then starts `caddy` last (it
+waits for `api`'s own healthcheck, not merely for `api` to have started —
+see "Monitoring and health checks" below).
 
-## 9. Run migrations (if not already applied)
+## 10. Run migrations (if not already applied)
 
 The `migrate` service already runs automatically as part of `up`. To
 re-run migrations after a later upgrade without restarting everything:
@@ -152,7 +225,11 @@ re-run migrations after a later upgrade without restarting everything:
 docker compose run --rm migrate
 ```
 
-## 10. Verify the stack
+(Not `docker compose exec migrate ...` — `migrate` is one-shot and exits
+immediately after running; there is no running container left to `exec`
+into. `run --rm` starts a fresh, disposable one.)
+
+## 11. Verify the stack
 
 ```sh
 docker compose ps                       # everything should be Up / healthy
@@ -161,23 +238,24 @@ curl -I https://your.domain             # should return a TLS-terminated respons
 docker compose logs migrate             # should show a clean, successful exit
 ```
 
-## 11. Configure the AP
+## 12. Configure the AP
 
 Follow `ops/ap-checklist.md` in full before powering on any node — several
 of its settings (channel, isolation) are much easier to get right before
 nodes are already associated and generating "why is this node missing"
 confusion.
 
-## 12. Provision and place the nodes
+## 13. Provision and place the nodes
 
 Flash each node's firmware with its `node_id`, its per-node PSK (see "Key
 management"), and the ingest UDP target (`HOMECSI_DOMAIN`:`HOMECSI_UDP_PORT`
 — or the VPS's IP:port if you prefer not to depend on DNS at the firmware
-level). Register the same `node_id` → PSK mapping server-side (see below).
-Place nodes physically, noting each one's room label to match
-`ops/ap-checklist.md`'s MAC/IP table.
+level). Register the same `node_id` → PSK mapping server-side (already
+done in step 7's `config.yaml`, if you're following in order). Place nodes
+physically, noting each one's room label to match `ops/ap-checklist.md`'s
+MAC/IP table.
 
-## 13. Confirm data is arriving
+## 14. Confirm data is arriving
 
 ```sh
 docker compose logs -f ingest
@@ -198,11 +276,11 @@ each node powers on and associates to the AP. If not, see
   openssl rand -hex 32
   ```
 
-- **Server side:** the key is registered in the node registry config
-  (`packages/config`, per `docs/protocol.md` §3/§5), keyed by `node_id`,
-  stored as base64. Wherever that config file lives on the VPS, treat it
-  with the same care as `ops/.env` — it is not meant to be committed with
-  real keys in it, only a template/example if one exists.
+- **Server side:** the key is registered in `ops/config.yaml`'s `nodes:`
+  list (see step 7 above and `ops/config.production.example.yaml`), keyed
+  by `node_id`, stored as base64. Treat that file with at least the same
+  care as `ops/.env` — mode `600`, never committed, only the
+  `.example.yaml` template is meant to be tracked.
 - **Node side:** the same raw 32 bytes are flashed into the node's NVS at
   provisioning time (firmware detail — see `docs/architecture.md` /
   firmware provisioning docs for the exact flashing step).
@@ -227,9 +305,13 @@ each node powers on and associates to the AP. If not, see
   feature/occupancy record and (per the retention policy — see "Disk
   management") a recent window of raw CSI history. This is the system's
   primary asset and is not regenerable if lost.
-- **Config and keys** — the node registry (server-side PSKs, `node_id`
+- **Config and keys** — `ops/config.yaml` (server-side PSKs, `node_id`
   mapping) and `ops/.env`. Losing this means every currently-deployed node
   is unusable until you re-provision it with a fresh key on both ends.
+  Neither is a database concern, so `ops/backup.sh` below does not cover
+  them — back these two files up yourself the same way you'd back up any
+  other secret (e.g. into whatever password manager/secrets store you
+  already use off-VPS).
 
 **Not worth backing up (or only loosely worth it):**
 - **Raw capture files** on disk (`HOMECSI_DATA_DIR/captures`) — these are
@@ -239,16 +321,60 @@ each node powers on and associates to the AP. If not, see
   backing these up against how much you'd actually replay them (see
   `replay` in the CLI) versus just accepting the gap.
 
-**Backing up TimescaleDB** (logical dump, portable across Postgres/Timescale
-minor versions — safer for occasional backups than a raw volume copy):
+**Backing up TimescaleDB:** run `ops/backup.sh` — it wraps the logical-dump
+command below (portable across Postgres/Timescale minor versions, safer
+for routine backups than a raw volume copy) with atomic-write and
+retention-pruning behavior so you don't have to reproduce that yourself:
 
 ```sh
-docker compose exec timescaledb pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB" > homecsi-$(date +%F).dump
+ops/backup.sh
 ```
 
-Store the resulting `.dump` file off the VPS (e.g. synced to another
+Equivalent to (this is what the script actually runs):
+
+```sh
+docker compose exec -T timescaledb pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB" > homecsi-$(date +%F).dump
+```
+
+**Schedule it** so backups happen without anyone remembering to run the
+command by hand — either a host crontab entry:
+
+```sh
+# sudo crontab -e  (root's crontab, NOT your own):
+0 2 * * * /opt/homecsi/ops/backup.sh >> /var/log/homecsi-backup.log 2>&1
+```
+
+It has to be root's crontab, for the same ownership reason as step 5:
+`/srv/homecsi/data/backups` is root-owned, so the same entry in an
+unprivileged user's crontab fails to write the dump. That failure is at
+least loud — a non-zero exit and an `EACCES` in the log above — but it
+happens nightly and unattended, so it is worth getting right the first
+time. The systemd timer below runs as root already.
+
+or the equivalent systemd timer, if you'd rather manage scheduling that
+way even on the Docker path:
+
+```sh
+sudo cp ops/systemd/homecsi-backup.service ops/systemd/homecsi-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now homecsi-backup.timer
+```
+
+**Verifying it ran:** `ls -lh /srv/homecsi/data/backups` (or wherever
+`HOMECSI_DATA_DIR` points) should show a `homecsi-<timestamp>.dump` file
+from the expected run, growing roughly with the database over time. A
+failure looks like: the script exits non-zero (cron mails the output, or
+`journalctl -u homecsi-backup.service` shows a non-zero exit and a
+`pg_dump` error on the systemd path); no new `.dump` file appears for a
+scheduled run; or a `.dump.tmp` file is left behind (the script only
+`mv`s it into place on success, so a leftover `.tmp` means a run was
+interrupted mid-dump). Treat any of these as an actionable alert, not
+routine noise — same posture as the `label preserve` sweep below.
+
+Store the resulting `.dump` files off the VPS too (e.g. synced to another
 machine or object storage) — a backup that lives only on the same disk as
-the thing it backs up doesn't survive a disk failure.
+the thing it backs up doesn't survive a disk failure; `ops/backup.sh`
+prunes its own local retention window but does not do this for you.
 
 **Restoring:**
 
@@ -257,7 +383,7 @@ docker compose up -d timescaledb
 # wait for it to be healthy, then:
 cat homecsi-2026-01-01.dump | docker compose exec -T timescaledb \
   pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists
-docker compose up -d migrate ingest api caddy
+docker compose up -d migrate ingest api caddy label-preserve
 ```
 
 Run `migrate` after a restore in case the dump predates a schema migration
@@ -322,33 +448,49 @@ window** (migration 007, see `docs/architecture.md` "Data lifecycle").
 Labelled sessions' raw per-link feature rows are copied out into
 `training_features` before that happens — but that copy only runs when a
 label session is actually stopped (from either the CLI or the web UI stop
-button). **Nothing runs it on a schedule by default** — there is no cron
-job, systemd timer, or Docker service configured for this out of the box,
-so an operator who never explicitly schedules it is relying entirely on
-every session being stopped cleanly through one of those two paths (see
-`docs/architecture.md`'s "Both stop paths trigger preservation,
-independently" for what each path does and does not guarantee on failure).
+button), so something also needs to run `homecsi label preserve`
+periodically as a backstop for: sessions left open with no stop call at
+all, a stop whose preservation attempt failed (CLI non-zero exit, or a web
+UI response carrying `preservationWarning`), and simply as defense in
+depth (see `docs/architecture.md`'s "Both stop paths trigger
+preservation, independently" for what each path does and does not
+guarantee on failure). Re-running it against sessions it already
+preserved is a safe, cheap no-op — including for sessions old enough that
+their `features` rows have since legitimately aged out (see
+`docs/architecture.md`'s data-lifecycle note on why the sweep does not
+alarm forever on those).
 
-**Schedule `homecsi label preserve` to run periodically** (daily is
-reasonable, comfortably inside the 7-day window) as the backstop for:
-sessions left open with no stop call at all, a stop whose preservation
-attempt failed (CLI non-zero exit, or a web UI response carrying
-`preservationWarning`), and simply as defense in depth. Re-running it
-against sessions it already preserved is a safe, cheap no-op — including
-for sessions old enough that their `features` rows have since legitimately
-aged out (see `docs/architecture.md`'s data-lifecycle note on why the
-sweep does not alarm forever on those).
+- **Docker path:** `ops/docker-compose.yml`'s `label-preserve` service
+  runs this on a schedule automatically, as part of `docker compose up
+  -d` — no separate cron/timer setup needed. It's a long-lived container
+  using the same image as `ingest`/`api`, looping `label preserve` once a
+  day (see the service's own comments for why a loop instead of `docker
+  compose run` from a host cron job: the schedule lives in the stack
+  itself, not in something an operator could forget to also set up).
 
-- **Docker path:** run it via the same image the `api`/`ingest` services
-  already use, against the running stack's network/config, without
-  starting a duplicate long-running server:
-
+  **Verify it ran:**
   ```sh
-  # crontab -e (as a user with access to `docker compose` in ops/):
-  # Pass the bare subcommand: the image's ENTRYPOINT already runs the CLI,
-  # and `docker compose run` arguments are appended to it, not substituted.
-  0 3 * * * cd /opt/homecsi/repo/ops && docker compose run --rm api label preserve >> /var/log/homecsi-label-preserve.log 2>&1
+  docker compose logs label-preserve
   ```
+  A healthy run logs `[label-preserve] running at <timestamp>` followed
+  by `[label-preserve] ok at <timestamp>`. **A failure looks like:**
+  `[label-preserve] FAILED (exit <n>) at <timestamp>` on stderr — grep for
+  it directly:
+  ```sh
+  docker compose logs label-preserve | grep FAILED
+  ```
+  Any match is a non-zero `label preserve` exit and should be treated as
+  an actionable alert, not routine noise — the CLI's own error output
+  appears in the surrounding log lines.
+
+  There is also no per-run timeout around the `label preserve` CLI call
+  itself, so a hung database connection stalls the loop silently - it
+  never reaches `sleep`, and no `FAILED` line is logged either, since the
+  command never returns to report one. **The absence of a `running at`
+  line for more than ~25h (the daily schedule plus margin) is itself the
+  alert** for that case: `docker compose logs label-preserve --since 25h
+  | grep 'running at'` coming back empty means the loop is stuck, not
+  quiet.
 
 - **systemd path:** install `ops/systemd/homecsi-label-preserve.service`
   and `.timer` (daily by default — see the timer file's `OnCalendar`) the
@@ -360,9 +502,13 @@ sweep does not alarm forever on those).
   sudo systemctl enable --now homecsi-label-preserve.timer
   ```
 
-Either way, treat a non-zero exit / non-empty error output from this sweep
-as an actionable alert, not routine noise — after this fix, a healthy
-deployment's sweep is expected to exit cleanly every time it runs.
+  **Verify it ran:** `systemctl list-timers homecsi-label-preserve.timer`
+  shows the last/next run; `journalctl -u homecsi-label-preserve.service
+  -n 50` shows its output. **A failure looks like:** a non-zero exit
+  status in `systemctl status homecsi-label-preserve.service` (`journalctl`
+  shows the CLI's own error text) — `Restart=` does not apply to oneshot
+  units triggered by a timer, so a failed run stays failed until the next
+  scheduled attempt; check on it if you don't see a clean run in a while.
 
 ## Log management
 
@@ -411,9 +557,18 @@ so a bad migration can be restored from rather than reasoned about live.
 
 ## Monitoring and health checks
 
-- `docker compose ps` — container-level health (the `timescaledb` service
-  has a real `pg_isready` healthcheck; `ingest`/`api`/`caddy` rely on
-  process liveness via `restart: unless-stopped`).
+- `docker compose ps` — container-level health. `timescaledb` has a real
+  `pg_isready` healthcheck; `api` has a real `/healthz`-based healthcheck
+  (`server/packages/api/src/routes/health.ts` — reports both process
+  liveness and DB reachability; `caddy`'s `depends_on: api` waits for this
+  to report healthy, not merely for the container to have started, before
+  it begins proxying/issuing TLS). `ingest` and `label-preserve` have no
+  healthcheck by design: `ingest` is UDP-only with no request/response
+  surface to honestly probe (see the comment on its compose service for
+  why a fake one would be worse than none), and `label-preserve` is a
+  scheduling loop, not a request-serving process — both rely on
+  `restart: unless-stopped` for the "crashed, bring it back" case a
+  healthcheck would otherwise cover.
 - `docker compose logs -f <service>` — tail logs per service.
 - Node liveness: watch for `HEARTBEAT` messages per `node_id` in the
   ingest logs/metrics (`docs/protocol.md` §10) — a node that stops sending

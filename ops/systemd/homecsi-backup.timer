@@ -1,0 +1,15 @@
+[Unit]
+Description=Home CSI - run ops/backup.sh nightly (see homecsi-backup.service)
+
+[Timer]
+# 02:00 local time - comfortably outside the 03:00 label-preserve sweep
+# (see homecsi-label-preserve.timer) so the two don't contend for the same
+# TimescaleDB container's I/O at the same moment. Persistent=true catches
+# up on a missed run (e.g. the host was off at 02:00) rather than silently
+# skipping it until the next scheduled time.
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

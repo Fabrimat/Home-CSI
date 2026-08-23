@@ -30,6 +30,7 @@ data
 # leaking into a stage that expects a clean install.
 **/node_modules
 **/dist
+**/ui-dist
 **/*.tsbuildinfo
 **/coverage
 

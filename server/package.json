@@ -10,7 +10,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b tsconfig.json",
+    "build": "tsc -b tsconfig.json && npm run build --workspace=@homecsi/web",
     "typecheck": "tsc -b tsconfig.json --force",
     "lint": "eslint .",
     "test": "vitest run",

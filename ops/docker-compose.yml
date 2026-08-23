@@ -2,9 +2,20 @@
 #
 # Usage (from repo root):
 #   cd ops
-#   cp .env.example .env      # then fill in real values
+#   cp .env.example .env                          # then fill in real values
+#   cp config.production.example.yaml config.yaml # then fill in per-node PSKs
+#   chmod 600 config.yaml
 #   docker compose up -d
-#   docker compose exec migrate ... (one-shot, see `migrate` service below)
+#   docker compose run --rm migrate ...  (one-shot; `migrate` exits after
+#     running, so `exec` into it fails with "no such container is running" —
+#     see the `migrate` service below. `up -d` already runs it once
+#     automatically; `run --rm` is for re-running it later, e.g. after an
+#     upgrade.)
+#
+# See docs/deployment.md for the full step-by-step runbook, including where
+# `config.yaml` and its per-node PSKs come from and how it differs from
+# server/packages/config/config.example.yaml (which uses host-relative
+# paths that don't exist inside these containers).
 #
 # Topology:
 #   Internet ---80/443---> caddy ---http---> api (internal only)
@@ -15,26 +26,56 @@
 # `migrate` is a one-shot job: it must complete successfully before `ingest`
 # and `api` start, so their `depends_on` uses `service_completed_successfully`
 # (not just "started") to avoid a race against an empty/half-migrated schema.
+#
+# Every service below sets `deploy.resources.limits` (cpus/memory). This is
+# a Swarm-originated key, but `docker compose up`'s Compose V2 CLI (the
+# `docker-compose-plugin`, not the legacy Python `docker-compose` v1) DOES
+# apply `deploy.resources.limits` and `deploy.restart_policy` as plain
+# container resource constraints even outside Swarm mode - it's only the
+# *other* `deploy` sub-keys (`replicas`, `placement`, `update_config`, ...)
+# that require Swarm and are silently ignored by `docker compose up`. This
+# is why a small shared VPS can rely on these limits without running
+# `docker stack deploy`.
 
 x-app-env: &app-env
   NODE_ENV: production
-  # ASSUMPTION (server config surface not yet finalized by sibling brief B1/B3 at
-  # the time this file was written): the CLI reads Postgres connection details and
-  # the HTTP/UDP ports from these HOMECSI_* environment variables, overriding the
-  # YAML config's defaults. If the real config schema uses different variable
-  # names, update this anchor accordingly - the docker-compose topology itself
-  # (service names, dependency order, port publication) does not depend on the
-  # exact variable names.
-  HOMECSI_DB_HOST: timescaledb
-  HOMECSI_DB_PORT: "5432"
-  HOMECSI_DB_NAME: ${POSTGRES_DB}
-  HOMECSI_DB_USER: ${POSTGRES_USER}
-  HOMECSI_DB_PASSWORD: ${POSTGRES_PASSWORD}
-  HOMECSI_UDP_PORT: ${HOMECSI_UDP_PORT:-5566}
-  HOMECSI_HTTP_PORT: "8080"
-  HOMECSI_API_TOKEN: ${HOMECSI_API_TOKEN}
-  HOMECSI_DATA_DIR: /data
-  HOMECSI_LOG_LEVEL: ${HOMECSI_LOG_LEVEL:-info}
+  # These names are exactly the HOMECSI_* overrides read by
+  # server/packages/config/src/env.ts's `ENV_VAR_PATHS` — verified against
+  # that file, not assumed. A drift test
+  # (server/packages/config/src/opsEnvDrift.test.ts) parses this anchor and
+  # fails the build if a name here is ever not in `ENV_VAR_PATHS` or the
+  # test's justified allowlist, so this comment cannot silently go stale
+  # again the way the previous "ASSUMPTION" version of it did.
+  #
+  # `nodes:` (the per-node PSK registry) and `logging.file.path` have no
+  # env override at all — see config.production.example.yaml's header for
+  # why a real config.yaml is mandatory regardless of how many of these are
+  # set. HOMECSI_CONFIG_PATH itself is not one of env.ts's config-value
+  # overrides; it's the CLI's own config *file* resolution variable (see
+  # packages/cli/src/resolveConfigPath.ts) — it has to be set here (rather
+  # than relying on the `./config.yaml`-relative-to-cwd default) because
+  # every service's WORKDIR is /app, not wherever config.yaml is mounted.
+  HOMECSI_CONFIG_PATH: /etc/homecsi/config.yaml
+  HOMECSI_SERVER_UDP_PORT: ${HOMECSI_UDP_PORT:-5566}
+  HOMECSI_SERVER_HTTP_PORT: "8080"
+  HOMECSI_SERVER_API_TOKEN: ${HOMECSI_SERVER_API_TOKEN}
+  HOMECSI_DATABASE_HOST: timescaledb
+  HOMECSI_DATABASE_PORT: "5432"
+  HOMECSI_DATABASE_NAME: ${POSTGRES_DB}
+  HOMECSI_DATABASE_USER: ${POSTGRES_USER}
+  HOMECSI_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+  HOMECSI_LOGGING_LEVEL: ${HOMECSI_LOGGING_LEVEL:-info}
+
+# Read-only bind mount of the operator's filled-in config.yaml (see the
+# header comment above and config.production.example.yaml) into every
+# service that runs the CLI. Never baked into the image (ops/Dockerfile
+# never COPYs it, and ops/Dockerfile.dockerignore excludes the whole
+# `ops/` directory from the build context) — it holds real per-node PSKs
+# and must come from the host at run time only. A single scalar anchor
+# (not a list) so it can sit alongside each service's other `volumes:`
+# entries — YAML has no clean way to merge two sequences via anchors the
+# way `<<:` merges mappings.
+x-config-volume: &config-volume "./config.yaml:/etc/homecsi/config.yaml:ro"
 
 x-logging: &default-logging
   # Docker log driver limits so a runaway/chatty container cannot fill the
@@ -118,6 +159,17 @@ services:
     # Intentionally NOT published to the host - reachable only on the
     # internal `homecsi` compose network. See ops/docker-compose.override.example.yml
     # for a local-dev variant that publishes it to 127.0.0.1 for inspection.
+    deploy:
+      resources:
+        limits:
+          # Matches the "modest VPS" assumption in this service's own
+          # `command:` tuning comments above (shared_buffers=512MB etc.) -
+          # a hard ceiling so a runaway query/connection storm cannot starve
+          # the ingest/api containers sharing this host. Raise alongside
+          # the `-c` tuning flags above if you provision a bigger VPS (see
+          # docs/deployment.md "VPS Sizing").
+          cpus: "2.0"
+          memory: 3G
     networks:
       - homecsi
     logging: *default-logging
@@ -134,10 +186,19 @@ services:
     # migrate`, and commander would reject `node` as an unknown subcommand.
     command: ["migrate"]
     environment: *app-env
+    volumes:
+      - *config-volume
     depends_on:
       timescaledb:
         condition: service_healthy
     restart: "no"
+    deploy:
+      resources:
+        limits:
+          # One-shot and short-lived; a generous cap that only guards
+          # against a genuinely runaway process, not a tuned budget.
+          cpus: "1.0"
+          memory: 512M
     networks:
       - homecsi
     logging: *default-logging
@@ -158,9 +219,28 @@ services:
       - "${HOMECSI_UDP_PORT:-5566}:${HOMECSI_UDP_PORT:-5566}/udp"
     volumes:
       - ${HOMECSI_DATA_DIR}:/data
+      - *config-volume
     depends_on:
       migrate:
         condition: service_completed_successfully
+    # No `healthcheck:` here on purpose: ingest is a UDP-only process with
+    # no HTTP (or any request/response) surface to probe, so there is no
+    # honest liveness check to write - a healthcheck that just checks "is
+    # the process running" would tell Docker nothing `restart:
+    # unless-stopped` doesn't already handle, and a healthcheck that opens
+    # its own UDP socket to itself would test the healthcheck's own
+    # networking, not ingest's. `restart: unless-stopped` (a crashed
+    # process exits non-zero and gets restarted) is the honest tool for
+    # this service - do not invent a fake HTTP endpoint here just to have
+    # a green checkmark in `docker compose ps`.
+    deploy:
+      resources:
+        limits:
+          # See docs/deployment.md "VPS Sizing" - ingest's own CPU cost is
+          # low (a handful of AEAD opens/sec even at 9 nodes); this is
+          # headroom against a bug (e.g. a decode loop), not a tuned budget.
+          cpus: "1.0"
+          memory: 512M
     networks:
       - homecsi
     logging: *default-logging
@@ -175,11 +255,89 @@ services:
     environment: *app-env
     volumes:
       - ${HOMECSI_DATA_DIR}:/data
+      - *config-volume
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      # No curl/wget in the node:20-bookworm-slim runtime image (see
+      # ops/Dockerfile) - use Node's own built-in `fetch` instead of adding
+      # a package just for this. Exec form (no shell) so quoting the JS is
+      # simple and no `/bin/sh` dependency is introduced either.
+      # `/healthz` (server/packages/api/src/routes/health.ts) is
+      # deliberately unauthenticated and reports both process liveness and
+      # DB reachability - exit 0 only on HTTP 200 (dbReachable === true).
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
     # No `ports:` here on purpose - the debug API/UI is only reached through
     # caddy's TLS reverse proxy on the `homecsi` network, never directly.
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  # Backstop for the training-set preservation sweep (see
+  # docs/architecture.md "Data lifecycle" and docs/deployment.md
+  # "Scheduling the training-set preservation sweep"). Labelled sessions'
+  # raw per-link features are only copied into `training_features` when a
+  # label session is stopped cleanly - without something running `label
+  # preserve` on a schedule, a session left open (or whose stop-path
+  # preservation attempt failed) silently loses its data at the 7-day
+  # `features` retention window (migration 007). This runs entirely inside
+  # one long-lived container using the same image as `ingest`/`api` -
+  # deliberately NOT `docker compose run` from a host cron job, so the
+  # schedule is part of `docker compose up -d` itself and does not depend
+  # on the operator separately remembering to install a host-level cron
+  # entry (see the systemd path's `.timer` unit for the equivalent there).
+  label-preserve:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    # Overrides the image's `ENTRYPOINT ["node", "packages/cli/dist/index.js"]`
+    # entirely (compose `entrypoint:` replaces, unlike `command:` which
+    # appends) so this service can run a scheduling loop around the CLI
+    # instead of a single CLI invocation. There is no cron daemon in the
+    # node:20-bookworm-slim runtime image (see ops/Dockerfile) and adding
+    # one is unnecessary complexity for "run this one command once a day" -
+    # a plain shell loop with `sleep` is the honest, minimal tool.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          echo "[label-preserve] running at $$(date -u +%FT%TZ)";
+          if node packages/cli/dist/index.js label preserve; then
+            echo "[label-preserve] ok at $$(date -u +%FT%TZ)";
+          else
+            echo "[label-preserve] FAILED (exit $$?) at $$(date -u +%FT%TZ)" >&2;
+          fi
+          sleep 86400;
+        done
+    restart: unless-stopped
+    environment: *app-env
+    volumes:
+      - *config-volume
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     networks:
       - homecsi
     logging: *default-logging
@@ -198,7 +356,18 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - api
+      api:
+        # Waits for api's own `healthcheck:` to report healthy, not just
+        # "started" - a bare `depends_on: [api]` only orders container
+        # start, so Caddy could start (and start proxying/ACME-issuing)
+        # against an api container that is up but not yet listening (or
+        # listening but unable to reach the database yet).
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     networks:
       - homecsi
     logging: *default-logging

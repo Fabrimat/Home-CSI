@@ -1,0 +1,165 @@
+# Home CSI — operator config template for the Docker Compose deployment
+# (ops/docker-compose.yml), NOT for local development.
+#
+# Why this file exists, and why it is not just server/packages/config/config.example.yaml:
+#   - server/packages/config/src/env.ts's HOMECSI_* environment overrides
+#     (see that file for the authoritative, current list) cover only
+#     secrets, network binding, and the storage capture directory. There is
+#     NO environment override for the per-node PSK registry (`nodes:`) or
+#     for the application log file path (`logging.file.path`) — both are
+#     structural config that can only come from a real YAML file. Setting
+#     env vars alone (even with every HOMECSI_* name correct) is therefore
+#     never sufficient to run this deployment; this file is mandatory.
+#   - server/packages/config/config.example.yaml uses host-relative paths
+#     (`../data/captures`, `../data/logs/...`) meant for running the CLI
+#     directly out of a `server/` checkout. Inside a container, `/data` is
+#     the *only* thing mounted (see the `ingest`/`api` services' `volumes:`
+#     in ops/docker-compose.yml) — this template uses `/data/...` paths
+#     throughout so a copy of it actually works in that container, not just
+#     on a bare-metal checkout.
+#
+# --- How to use this file ---
+#   1. cp ops/config.production.example.yaml ops/config.yaml
+#   2. Fill in the `nodes:` list with your real, unique per-node PSKs
+#      (`openssl rand -base64 32` — one per node, NEVER reused across
+#      nodes; see docs/deployment.md "Key management" for why reuse breaks
+#      the wire protocol's nonce-uniqueness guarantee, not just a mild
+#      misconfiguration).
+#   3. Leave `server.apiToken` and `database.password` as the placeholders
+#      below — they are the two secrets that come from `ops/.env` instead
+#      (via the `HOMECSI_SERVER_API_TOKEN` / `HOMECSI_DATABASE_PASSWORD`
+#      overrides applied by the `x-app-env` anchor in
+#      ops/docker-compose.yml), not from this file, so the same
+#      never-commit-a-real-secret rule that applies to `ops/.env` does not
+#      *also* require a real value here. They still have to be individually
+#      valid per server/packages/config/src/schema.ts (min length etc.) —
+#      hence the placeholders are schema-shaped junk, not empty strings.
+#   4. `chmod 600 ops/config.yaml` and `chown 10001:10001 ops/config.yaml`
+#      — it holds real per-node key material once step 2 is done. 10001 is
+#      the fixed, non-root UID/GID `ops/Dockerfile` assigns its runtime
+#      `homecsi` user (pinned specifically so this chown target is stable
+#      across rebuilds); without it, the container's non-root process
+#      cannot read a mode-600 file owned by a different host UID.
+#      `ops/config.yaml` is git-ignored (see repo-root .gitignore); never
+#      commit a filled-in copy, in any form.
+#   5. docker-compose.yml bind-mounts `./config.yaml` read-only into every
+#      service that runs the CLI, at `/etc/homecsi/config.yaml`, and sets
+#      `HOMECSI_CONFIG_PATH=/etc/homecsi/config.yaml` so the CLI finds it
+#      regardless of its own working directory inside the container (see
+#      `packages/cli/src/resolveConfigPath.ts`).
+#
+# Every key below is validated by @homecsi/config's zod schema
+# (server/packages/config/src/schema.ts) — an unknown or missing key is a
+# startup error (`migrate`/`ingest`/`serve` all refuse to start), not a
+# silent default.
+
+server:
+  udp:
+    # 0.0.0.0 inside the container: the `ingest` service's UDP socket must
+    # bind every interface reachable from the container network namespace,
+    # not just loopback - the "which interface is actually reachable from
+    # the Internet" question is answered by ops/docker-compose.yml's
+    # `ports:` publication, not by this bind address.
+    host: "0.0.0.0"
+    port: 5566
+  http:
+    host: "0.0.0.0"
+    port: 8080
+  # Placeholder — always overridden at deploy time by HOMECSI_SERVER_API_TOKEN
+  # (set from ops/.env's HOMECSI_SERVER_API_TOKEN). Never replace this with a real
+  # token in this file; put the real token in ops/.env instead.
+  apiToken: "REPLACE-VIA-ops/.env-HOMECSI_SERVER_API_TOKEN-NOT-HERE"
+
+database:
+  # Overridden by HOMECSI_DATABASE_HOST at deploy time (ops/docker-compose.yml's
+  # x-app-env anchor sets it to the `timescaledb` service name so Docker's
+  # internal DNS resolves it) — this value only matters if this exact file
+  # is ever loaded outside that anchor (e.g. `doctor` run by hand on the
+  # host without HOMECSI_DATABASE_HOST set), where it is not a useful
+  # default anyway; kept as an inert, schema-valid placeholder.
+  host: "127.0.0.1"
+  port: 5432
+  database: "homecsi"
+  user: "homecsi"
+  # Placeholder — always overridden by HOMECSI_DATABASE_PASSWORD (set from
+  # ops/.env's POSTGRES_PASSWORD via the x-app-env anchor). Never replace
+  # this with a real password in this file.
+  password: "REPLACE-VIA-ops/.env-POSTGRES_PASSWORD-NOT-HERE"
+  ssl: false
+  pool:
+    min: 1
+    max: 10
+
+# One entry per physical node. `id` matches the wire protocol's node_id
+# (docs/protocol.md section 3). `psk` is the 32-byte ChaCha20-Poly1305 key,
+# base64-encoded (docs/protocol.md section 5).
+#
+# NEVER reuse a PSK across nodes. The protocol's nonce-uniqueness guarantee
+# (`nonce = node_id || boot_epoch || seq || 0x0000`, docs/protocol.md §4) is
+# only unique *per key* — two nodes sharing a key would each independently
+# produce nonces that collide with the other node's (boot_epoch, seq)
+# sequence, a nonce-reuse break of ChaCha20-Poly1305's guarantees. The two
+# entries below are deliberately DIFFERENT placeholder keys to make that
+# requirement obvious at a glance — generate a fresh, distinct key per real
+# node with `openssl rand -base64 32`, do not reuse either placeholder.
+nodes:
+  - id: 1
+    name: "node-living-room"
+    room: "living-room"
+    psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    expectedMac: "aa:bb:cc:dd:ee:01"
+  - id: 2
+    name: "node-hallway"
+    room: "hallway"
+    psk: "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA="
+
+storage:
+  # Container-correct: /data is the only volume mounted into `ingest`/`api`
+  # (see ops/docker-compose.yml's `volumes:`), backed on the host by
+  # HOMECSI_DATA_DIR (ops/.env). There IS an env override for this one
+  # field (HOMECSI_STORAGE_CAPTURE_DIR), but setting it would still leave
+  # `logging.file.path` below wrong — hence this whole file, not just that
+  # one override.
+  captureDir: "/data/captures"
+  rotation:
+    maxBytes: 536870912 # 512 MiB
+    maxIntervalMs: 3600000 # 1 hour
+  retention:
+    maxAgeMs: 604800000 # 7 days
+    maxTotalBytes: 32212254720 # 30 GiB
+  compression:
+    enabled: true
+    afterMs: 86400000 # 1 day
+
+features:
+  windowMs: 2000
+  hopMs: 500
+  subcarrierSelection: "all"
+  baselineAdaptationRate: 0.02
+
+occupancy:
+  thresholds:
+    motionOnThreshold: 3.0
+    motionOffThreshold: 1.5
+  latchDecayHorizonMs: 1800000 # 30 minutes
+  hysteresisMs: 30000
+  multiOccupancy:
+    crossNodeSimultaneityThresholdMs: 5000
+
+logging:
+  level: "info"
+  file:
+    # Container-correct: no HOMECSI_* override exists for this path (see
+    # the header comment above), so it MUST be right in this file — /data
+    # is the only writable, persisted mount point inside the container.
+    path: "/data/logs/homecsi.log"
+    maxFiles: 14
+    maxSizeMb: 50
+
+# Optional — see server/packages/config/config.example.yaml for the full
+# explanation of why this section is allowed to be entirely absent. Kept
+# here at the built-in defaults for the Docker deployment.
+training:
+  preservation:
+    baselineWindowMs: 3600000 # 1 hour
+    minDensityFraction: 0.5

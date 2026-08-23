@@ -41,35 +41,71 @@ deploy procedure (see `docs/deployment.md`).
    sudo ln -s /opt/homecsi/repo/server /opt/homecsi/server
    ```
 
-3. **`EnvironmentFile`.** Both unit files load
-   `/etc/homecsi/homecsi.env` — a plain `KEY=value` file, not sourced by a
-   shell, so no quoting/expansion. Create it from the same variables as
-   `ops/.env.example` (the `HOMECSI_*` ones; skip the Docker/Compose-only
-   ones like `HOMECSI_IMAGE_TAG`), plus the Postgres connection details
-   pointing at wherever Postgres actually runs in this setup:
+3. **`config.yaml`.** Just like the Docker path (see
+   `ops/config.production.example.yaml`), there is no environment-variable
+   override for the per-node PSK registry or the application log file
+   path (see `server/packages/config/src/env.ts`) — a real config file is
+   mandatory regardless of what you put in step 4's env file. Copy the
+   same template used by the Docker path (its `server.udp/http` bind
+   addresses and `storage/logging` paths are container-specific, but the
+   `nodes:` PSK registry section is identical either way) and point it at
+   a real path outside `/opt/homecsi/server` — that directory gets
+   replaced wholesale on every deploy (`git pull` / rsync), so keeping
+   secrets inside it risks either losing them on redeploy or accidentally
+   including them in a release artifact:
 
    ```sh
    sudo mkdir -p /etc/homecsi
+   sudo cp /opt/homecsi/repo/ops/config.production.example.yaml /etc/homecsi/config.yaml
+   sudo "$EDITOR" /etc/homecsi/config.yaml   # fill in real per-node PSKs;
+     # also change server.udp/http.host if 0.0.0.0 isn't right for this
+     # host, storage.captureDir/logging.file.path to real filesystem paths
+     # under /srv/homecsi/data (there is no /data mount here - that path
+     # is Docker-path-specific), and database.host to wherever Postgres
+     # actually runs (127.0.0.1 if it's a native/local install, or its
+     # own address if it's a standalone Docker container per this file's
+     # intro paragraph).
+   sudo chown homecsi:homecsi /etc/homecsi/config.yaml
+   sudo chmod 600 /etc/homecsi/config.yaml
+   ```
+
+4. **`EnvironmentFile`.** All unit files load
+   `/etc/homecsi/homecsi.env` — a plain `KEY=value` file, not sourced by a
+   shell, so no quoting/expansion. Names below are exactly the HOMECSI_*
+   overrides `server/packages/config/src/env.ts` (`ENV_VAR_PATHS`) reads,
+   plus `HOMECSI_CONFIG_PATH` (read by the CLI itself, pointing at the
+   file from step 3, not by `applyEnvOverrides`) — this file's env block
+   is checked against `ENV_VAR_PATHS` by the same drift test that checks
+   `ops/docker-compose.yml`
+   (`server/packages/config/src/opsEnvDrift.test.ts`), so a wrong name
+   here fails `npm test` before it ever reaches a real VPS:
+
+   ```sh
    sudo tee /etc/homecsi/homecsi.env > /dev/null <<'EOF'
    NODE_ENV=production
-   HOMECSI_DB_HOST=127.0.0.1
-   HOMECSI_DB_PORT=5432
-   HOMECSI_DB_NAME=homecsi
-   HOMECSI_DB_USER=homecsi
-   HOMECSI_DB_PASSWORD=changeme-generate-a-real-secret
-   HOMECSI_UDP_PORT=5566
-   HOMECSI_HTTP_PORT=8080
-   HOMECSI_API_TOKEN=changeme-generate-a-real-secret
-   HOMECSI_DATA_DIR=/srv/homecsi/data
-   HOMECSI_LOG_LEVEL=info
+   HOMECSI_CONFIG_PATH=/etc/homecsi/config.yaml
+   HOMECSI_DATABASE_HOST=127.0.0.1
+   HOMECSI_DATABASE_PORT=5432
+   HOMECSI_DATABASE_NAME=homecsi
+   HOMECSI_DATABASE_USER=homecsi
+   HOMECSI_DATABASE_PASSWORD=changeme-generate-a-real-secret
+   HOMECSI_SERVER_UDP_PORT=5566
+   HOMECSI_SERVER_HTTP_PORT=8080
+   HOMECSI_SERVER_API_TOKEN=changeme-generate-a-real-secret
+   HOMECSI_LOGGING_LEVEL=info
    EOF
    sudo chown root:homecsi /etc/homecsi/homecsi.env
    sudo chmod 640 /etc/homecsi/homecsi.env
    ```
 
    Keep this file out of git — it holds the same secrets as `ops/.env`.
+   Unlike the Docker path, there is no separate `HOMECSI_DATA_DIR`
+   variable here: `storage.captureDir` and `logging.file.path` in
+   `config.yaml` (step 3) are already real filesystem paths on this host,
+   not a `/data`-mount indirection, so nothing needs to translate one into
+   the other.
 
-4. **Install and enable the units:**
+5. **Install and enable the units:**
 
    ```sh
    sudo cp ops/systemd/homecsi-ingest.service ops/systemd/homecsi-api.service /etc/systemd/system/
@@ -77,7 +113,7 @@ deploy procedure (see `docs/deployment.md`).
    sudo systemctl enable --now homecsi-ingest homecsi-api
    ```
 
-5. **Install and enable the training-set preservation timer.** Unlike
+6. **Install and enable the training-set preservation timer.** Unlike
    `ingest`/`api`, this one is a one-shot (`Type=oneshot`) unit driven by a
    companion `.timer`, not a long-running service — enable the `.timer`,
    not the `.service`, so it runs on the schedule instead of once at boot.
@@ -128,8 +164,19 @@ This systemd path does not include Caddy. If you're avoiding Docker
 entirely, install Caddy natively (`apt-get install caddy` from Caddy's own
 apt repo, or download the binary) and point it at `ops/Caddyfile`'s
 `reverse_proxy` target — replace `api:8080` with `127.0.0.1:8080` (or
-whatever `HOMECSI_HTTP_PORT` you set above), since there's no Docker network
-DNS to resolve the `api` service name in this path.
+whatever `HOMECSI_SERVER_HTTP_PORT` you set above), since there's no Docker
+network DNS to resolve the `api` service name in this path.
+
+## Backups
+
+`ops/backup.sh` assumes the Docker compose path (it shells out to `docker
+compose exec timescaledb pg_dump`) and does not apply here. On this path,
+back up Postgres directly with `pg_dump` against wherever it runs (see step
+3's `database.host`) and schedule it with a plain systemd timer of your
+own, or your distro's native Postgres backup tooling if it has one. See
+docs/deployment.md "Backup and restore" for the underlying `pg_dump`
+command and what's/isn't worth backing up — only the `docker compose exec`
+wrapping differs.
 
 ## Firewall / hardening
 
