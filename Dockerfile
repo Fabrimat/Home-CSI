@@ -33,10 +33,10 @@
 #     successfully but silently ship an API with no UI - see
 #     server/packages/api/src/server.ts's "web assets directory does not
 #     exist" fallback branch.
-#   - The CLI entry point is server/packages/cli/dist/index.js. It is baked
-#     into the exec-form ENTRYPOINT below, so a per-service `command:` in
-#     ops/docker-compose.yml (and any `docker compose run` argument) must be
-#     the BARE SUBCOMMAND only - e.g. `["serve"]`, not
+#   - The CLI entry point is server/packages/cli/dist/index.js. It is invoked
+#     by docker-entrypoint.sh (the image ENTRYPOINT), so a per-service
+#     `command:` in ops/docker-compose.yml (and any `docker compose run`
+#     argument) must be the BARE SUBCOMMAND only - e.g. `["serve"]`, not
 #     `["node", "packages/cli/dist/index.js", "serve"]`. A compose `command:`
 #     is appended to an exec-form ENTRYPOINT, never substituted for it, so
 #     repeating the interpreter yields a doubled argv the CLI rejects.
@@ -97,6 +97,13 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=prod-deps /app/package.json ./package.json
 COPY --from=build /app/packages ./packages
 
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# chmod rather than trusting the checked-in file mode: this repository is
+# routinely worked on from Windows, where git records 100644 for every file, so
+# a bare COPY can land a non-executable entrypoint and the container then dies
+# on startup with "permission denied".
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
+
 RUN mkdir -p /data && chown -R homecsi:homecsi /app /data
 USER homecsi
 
@@ -106,20 +113,21 @@ VOLUME ["/data"]
 # HOMECSI_* env vars and actually published per-service in
 # ops/docker-compose.yml, not baked into the image.
 
-ENTRYPOINT ["node", "packages/cli/dist/index.js"]
-# Default subcommand when none is given. `serve` (the HTTP API + dashboard)
-# rather than `doctor`, because a Coolify Application built from this
-# Dockerfile CANNOT override the command: Coolify's API rejects
-# `custom_start_command` for the dockerfile build pack outright ("This field
-# is not allowed.", HTTP 422 - verified against a live 4.3.10 instance, not
-# assumed), and there is no such field in its UI either. With `doctor` as the
-# default such a deployment ran diagnostics, exited 0, and crash-looped until
-# Coolify gave up at max_restart_count - which is exactly what happened on the
-# first real deploy.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# Deliberately NO `CMD`. The entrypoint script picks the role itself when it is
+# given no arguments - `${HOMECSI_COMMAND:-serve}` - and a `CMD` here would make
+# that env var unreachable: a container started with no override still receives
+# CMD as its arguments, and the script cannot tell that apart from an operator
+# asking for a specific subcommand. Coolify needs the env-var path (its
+# dockerfile build pack cannot set a command at all - HTTP 422 on
+# `custom_start_command`, verified against a live 4.3.10 instance), while every
+# service in ops/docker-compose*.yml passes an explicit `command:` and takes the
+# argument path instead. See docker-entrypoint.sh for the full reasoning.
 #
-# Safe for every other path: each service in ops/docker-compose.yml and
-# ops/docker-compose.coolify.yml sets its own `command:` (migrate / ingest /
-# serve), which overrides CMD, and label-preserve replaces `entrypoint:`
-# entirely. Run `doctor` explicitly when you want it:
+# Either way the argument is the BARE SUBCOMMAND only - e.g. `serve`, not
+# `node packages/cli/dist/index.js serve` - since the entrypoint supplies the
+# interpreter and script path.
+#
+# One-off commands are passed as arguments, which bypasses the role selection
+# and the auto-migrate entirely:
 #   docker run --rm homecsi-server:local doctor
-CMD ["serve"]

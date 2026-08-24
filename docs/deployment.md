@@ -322,12 +322,18 @@ Create a Coolify **Application** resource pointed at this repository:
   the dockerfile build pack's UI offers no equivalent. Coolify runs the built
   image as-is.
 
-  That is why this repo's `Dockerfile` defaults to `CMD ["serve"]`. It used to
-  be `CMD ["doctor"]`, and the first real Coolify deploy of this project did
-  exactly what that implies: built fine, ran diagnostics, exited 0, and
-  crash-looped ten times until Coolify gave up at `max_restart_count`. If you
-  ever need a different subcommand in a Coolify **Application**, you cannot
-  ask Coolify for it — see the `ingest` section below for what that costs.
+  That is what `docker-entrypoint.sh` is for. The image has **no `CMD`**; its
+  entrypoint, given no arguments, runs `${HOMECSI_COMMAND:-serve}`. So the role
+  is selected by an environment variable — which Coolify *can* set — and the
+  default is the one an Application with a domain wants anyway. Leave
+  `HOMECSI_COMMAND` unset here and this Application serves the dashboard and
+  the device API. Set it to `ingest` on a second Application (section 3) and
+  the same image becomes the UDP receiver.
+
+  This matters more than it looks: it used to be `CMD ["doctor"]`, and the
+  first real Coolify deploy of this project did exactly what that implies —
+  built fine, ran diagnostics, exited 0, and crash-looped ten times until
+  Coolify gave up at `max_restart_count`.
 - **Environment variables:** set on this Application's own Environment
   Variables tab — see "Environment variables" below for the full list.
   Include `HOMECSI_CONFIG_PATH=/etc/homecsi/config.yaml` explicitly: the
@@ -348,85 +354,88 @@ Create a Coolify **Application** resource pointed at this repository:
   plaintext. A read-only file mount at this exact path is the same end
   state as the vanilla path's `x-config-volume` bind mount, needing zero
   new server-side code.
-- **Pre-deployment command:** `migrate`. **ASSUMED** — Coolify's
-  pre-deployment-command feature, and specifically whether a non-zero
-  exit actually blocks the deployment from proceeding, was not
-  independently confirmed here. This replaces the compose file's
-  `migrate` service and its `service_completed_successfully` gate — the
-  property that has to hold one way or another is migrations completing
-  *before* `api`/`ingest` start serving traffic against a possibly-
-  unmigrated schema. If your Coolify version's pre-deployment command
-  does not reliably block on failure, run `migrate` by hand before
-  deploying instead of relying on it.
-- **Domain/FQDN:** point your domain at this Application on port 8080.
-  **ASSUMED, not independently confirmed** — a "Domains" field, a magic
-  `SERVICE_FQDN`-style environment variable, or something else, depending
-  on your Coolify version. Coolify (not Caddy) terminates TLS here — there
-  is no ACME/Let's Encrypt step to run yourself, and
-  `HOMECSI_DOMAIN`/`HOMECSI_ACME_EMAIL` (the vanilla path's Caddy inputs)
-  do not apply.
+- **Pre-deployment command: leave it empty.** Migrations run themselves.
+  `docker-entrypoint.sh` runs `migrate` to completion before starting `serve`,
+  but *only* on the no-arguments path — i.e. exactly the Coolify Application
+  case, never the compose case, which keeps its own one-shot `migrate` service
+  (`packages/db`'s migration runner takes no advisory lock, so two concurrent
+  runs would race). It retries for up to 60 s, because the database is a
+  separate Coolify resource with no `depends_on` to order this after it, and a
+  hard failure on a cold start would burn one of the container's ten allowed
+  restarts.
+
+  This replaces what the compose file gets from `service_completed_successfully`
+  on its `migrate` service: the property that has to hold is migrations
+  completing before anything serves traffic against an unmigrated schema.
+  Note that `ingest` does **not** auto-migrate — see section 3.
+- **Domain/FQDN:** set it to your domain on this Application; Coolify
+  terminates TLS itself. **VERIFIED** against a live 4.3.10 instance
+  (`https://csi.larosa.work`): the field is the Application's own `fqdn`, the
+  reverse proxy routes it to Ports Exposes (`8080`) with no extra config, and
+  there is no ACME/Let's Encrypt step to run yourself.
+  `HOMECSI_DOMAIN`/`HOMECSI_ACME_EMAIL` (the vanilla path's Caddy inputs) do
+  not apply. Point the DNS record at the Coolify host *before* saving, or the
+  certificate issuance fails and quietly retries.
 
 ### 2. Database: TimescaleDB, not plain Postgres
 
 Create a separate database resource. **Use TimescaleDB, not Coolify's
 stock Postgres** — this is a fact about this repo, not a Coolify setting:
 the migrations in `server/packages/db` create hypertables, which plain
-Postgres cannot run. Pin the same image the compose path uses:
-`timescale/timescaledb:2.17.2-pg16`.
+Postgres cannot run.
 
-**ASSUMED, not independently confirmed:** whether Coolify's own
-"PostgreSQL" resource type permits overriding its image to
-`timescale/timescaledb`, or whether it needs to be added as a
-generic/custom Docker-image resource instead to run a non-stock image.
-Check your dashboard; either way, what actually matters is the image
-(`timescale/timescaledb:2.17.2-pg16`) and the credentials
+**VERIFIED** against a live 4.3.10 instance: Coolify's own "PostgreSQL"
+resource type *does* accept an overridden image, so a standalone PostgreSQL
+resource running `timescale/timescaledb:2.17.2-pg17` is all you need — no
+generic/custom Docker-image resource, no compose file.
+
+Pin the tag. `latest-pg17` is a moving target, and changing the major
+Postgres version under an existing data directory does not fail gracefully:
+Postgres refuses to start at all (*"database files are incompatible with
+server"*) and the only way out is deleting the volume. Note this is
+`pg17`, one major ahead of the `pg16` the compose path pins — pick one
+per deployment and stay there.
+
+What actually matters: the image, and the credentials
 (`POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`, referenced by `api`'s
 and `ingest`'s `HOMECSI_DATABASE_*` env vars — see "Environment variables"
-below). Do not publish this resource's port to the Internet.
+below). Coolify's default user/database are both `postgres`; set
+`HOMECSI_DATABASE_USER`/`HOMECSI_DATABASE_NAME` to match whatever you
+actually created. Do not publish this resource's port to the Internet —
+the two Applications reach it over Coolify's internal Docker network, where
+the hostname is the database resource's UUID.
 
 ### 3. Application: `ingest`
 
-A second Coolify Application, same repository, same Dockerfile:
+A second Coolify Application, same repository, same Dockerfile, differing
+from `api` in exactly three settings:
 
-- Same Build Pack/Base Directory as `api` above (both **VERIFIED**).
-- **The command problem — read this before creating the resource.** `ingest`
-  needs a *different* subcommand from the same image, and as established in
-  the `api` section Coolify's dockerfile build pack cannot override the
-  command at all (HTTP 422, **VERIFIED**). A plain Application built from this
-  Dockerfile will therefore run `serve`, not `ingest`. Three honest options:
-    1. **Run ingest from a Docker Compose resource** instead, where `command:`
-       works normally — `ops/docker-compose.coolify.yml` already defines it.
-       Least new machinery; the two resources then differ in kind.
-    2. **Make the image role-selectable by environment variable** (e.g. the
-       CLI falling back to `$HOMECSI_COMMAND` when argv carries no
-       subcommand, defaulting to `serve`). One small change in
-       `server/packages/cli`, after which one image plus one env var covers
-       every role and Coolify Applications work for all of them. This is the
-       clean fix and is NOT implemented yet.
-    3. A second Dockerfile whose only difference is its `CMD` — rejected
-       here: two image definitions that must never drift is the exact problem
-       moving the Dockerfile to the repo root was meant to avoid.
-- **Port mapping: `5566:5566/udp`.** This is the one setting that differs
-  in kind from `api`'s Ports Exposes: UDP ingest does **not** go through
-  Coolify's HTTP reverse proxy at all — that proxy only understands
-  HTTP(S). **Without an explicit UDP port mapping, every node transmits
-  into a void:** datagrams arrive at a port nothing is publishing, ingest
-  sees nothing, and there is no error on either side pointing at why.
-  Confirm your Coolify host's firewall (or cloud provider security group)
-  actually allows inbound UDP on this port too — Coolify's own reverse
-  proxy config has no bearing on it.
-- Same config file mount (`/etc/homecsi/config.yaml`) and
-  `HOMECSI_CONFIG_PATH` env var as `api` above — `ingest` needs the same
-  node PSK registry to authenticate incoming datagrams.
-- No healthcheck to configure — see `ops/docker-compose.coolify.yml`'s
-  `ingest` service comment for why a fake one would be worse than none;
-  the same reasoning applies regardless of hosting.
-- Migrations still need to complete before this Application's first
-  deploy goes live, the same as for `api` — either rely on a
-  pre-deployment command here too, or simply run `migrate` once by hand
-  before either Application's first deploy (migrations are expected to be
-  additive/idempotent for subsequent redeploys — see "Upgrades and
-  rollback" below).
+- **`HOMECSI_COMMAND=ingest`.** This is the whole trick, and it is why the
+  image has no `CMD` — see the Start Command bullet in section 1.
+  Without it this Application would silently be a second copy of `serve`.
+- **Port mapping: `5566:5566/udp`.** Not "Ports Exposes" — a real published
+  host port, and the one setting that differs in kind from `api`. UDP ingest
+  does **not** go through Coolify's HTTP reverse proxy; that proxy only
+  understands HTTP(S). **Without an explicit UDP port mapping, every node
+  transmits into a void:** datagrams arrive at a port nothing is publishing,
+  ingest sees nothing, and there is no error on either side pointing at why.
+  Confirm the host's firewall (or cloud provider security group) allows
+  inbound UDP on this port too — Coolify's reverse proxy config has no
+  bearing on it.
+- **No domain, and healthcheck disabled.** `ingest` speaks no HTTP, so a
+  health check on it can only ever fail; see
+  `ops/docker-compose.coolify.yml`'s `ingest` service comment for why a fake
+  one would be worse than none.
+
+Everything else is copied from `api`: same Build Pack, same Base Directory
+`/`, same `HOMECSI_DATABASE_*`, same `HOMECSI_CONFIG_PATH` and the same
+config file mount at `/etc/homecsi/config.yaml` — `ingest` needs the same
+node PSK registry to authenticate incoming datagrams.
+
+`ingest` deliberately does **not** auto-migrate (only the `serve` role does,
+so the two never race). On a first deploy, let the `api` Application come up
+healthy before deploying this one; on redeploys the order does not matter,
+since migrations are additive — see "Upgrades and rollback" below.
 
 ### 4. `label-preserve` as a scheduled task, not a third Application
 
@@ -472,6 +481,11 @@ from `ops/.env.example` is the compose path's own outer variable name for
 `5566` in `ingest`'s port mapping above and its `HOMECSI_SERVER_UDP_PORT`
 env var — there is no separate host-level firewall script on this path,
 so the outer/inner name split does not apply.
+
+One variable exists only on this path: **`HOMECSI_COMMAND`**, which picks the
+CLI subcommand the container runs (`docker-entrypoint.sh`, section 1). Leave it
+unset on `api`; set it to `ingest` on `ingest`. It has no compose equivalent —
+there, each service's `command:` says the same thing more directly.
 
 ### 6. `/data`: shared between two Applications — the most fragile part of this topology
 

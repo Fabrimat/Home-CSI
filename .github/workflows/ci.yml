@@ -86,7 +86,17 @@ jobs:
         # .dockerignore. ops/docker-compose.yml sets build.context: .. for the
         # same reason, and the Dockerfile lives at the repo root because
         # Coolify's build pack offers only a Base Directory (see its header).
-        run: docker build -f Dockerfile .
+        run: docker build -f Dockerfile -t homecsi-ci .
+
+      - name: Smoke-test the image entrypoint
+        # Cheap guard on docker-entrypoint.sh, which is what makes one image
+        # serve two roles (see its header and docs/deployment.md section 1).
+        # Passing an argument takes the passthrough branch, so this reaches the
+        # CLI without needing a config file or a database -- and it fails loudly
+        # if the script is not executable, or has CRLF endings (a CRLF shebang
+        # makes the kernel hunt for an interpreter named "/bin/sh\r" and report
+        # "no such file or directory" about a path that plainly exists).
+        run: docker run --rm homecsi-ci --help | grep -q 'run the UDP ingest server'
 
       - name: Validate docker-compose.yml
         run: docker compose -f ops/docker-compose.yml config

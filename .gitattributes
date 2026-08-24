@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts that run inside a Linux container must keep LF endings even
+# when checked out on Windows: `* text=auto` above would give this file CRLF
+# there, and a CRLF shebang line makes the kernel look for an interpreter
+# literally named "/bin/sh\r" - the container then dies at startup with
+# "no such file or directory", naming a path that plainly exists.
+docker-entrypoint.sh text eol=lf
