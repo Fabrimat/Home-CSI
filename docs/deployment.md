@@ -333,10 +333,12 @@ Create a Coolify **Application** resource pointed at this repository:
   it is still there. Coolify does warn about it — several lines above the
   error it causes.
 
-  Set **Start Period** to at least `90` seconds. The default 5 s plus 10
-  retries at 5 s gives the container 55 s to answer, and
-  `docker-entrypoint.sh` may legitimately spend up to 60 s retrying
-  migrations against a database that is still starting.
+  Leave **Start Period** low - `20` seconds is enough. Raising it is a trap:
+  Coolify does nothing at all until it expires, so if the container exits
+  before then the healthcheck has nothing left to inspect and the deployment
+  fails with `docker inspect ... Error: no such object` instead of the real
+  reason. `docker-entrypoint.sh` keeps its own migrate retry window (20 s)
+  deliberately shorter than this, for the same reason.
 - **Start Command: there is no such field, and you do not need one.**
   **VERIFIED** the hard way: `PATCH /api/v1/applications/{uuid}` with
   `custom_start_command` is rejected outright by Coolify 4.3.10 —

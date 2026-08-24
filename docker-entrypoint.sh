@@ -37,9 +37,15 @@ if [ "$#" -eq 0 ]; then
     # failure here burns one of the container's ten Coolify restarts, and ten
     # lost cold-start races would leave the application stopped, needing a
     # manual redeploy to recover.
+    #
+    # Deliberately short (10 x 2s = 20s, not minutes): a migration that fails
+    # for any reason other than "the database is not up yet" will fail
+    # identically forever, and a long retry loop only delays the container's
+    # exit past the point where Coolify still has a container to inspect -
+    # its healthcheck then reports "no such object" instead of the real error.
     attempt=1
     until node "$cli" migrate; do
-      if [ "$attempt" -ge 30 ]; then
+      if [ "$attempt" -ge 10 ]; then
         echo "entrypoint: migrations still failing after $attempt attempts, giving up" >&2
         exit 1
       fi
