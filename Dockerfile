@@ -107,6 +107,19 @@ VOLUME ["/data"]
 # ops/docker-compose.yml, not baked into the image.
 
 ENTRYPOINT ["node", "packages/cli/dist/index.js"]
-# Default subcommand if none given; every service in docker-compose.yml
-# overrides this via `command:`.
-CMD ["doctor"]
+# Default subcommand when none is given. `serve` (the HTTP API + dashboard)
+# rather than `doctor`, because a Coolify Application built from this
+# Dockerfile CANNOT override the command: Coolify's API rejects
+# `custom_start_command` for the dockerfile build pack outright ("This field
+# is not allowed.", HTTP 422 - verified against a live 4.3.10 instance, not
+# assumed), and there is no such field in its UI either. With `doctor` as the
+# default such a deployment ran diagnostics, exited 0, and crash-looped until
+# Coolify gave up at max_restart_count - which is exactly what happened on the
+# first real deploy.
+#
+# Safe for every other path: each service in ops/docker-compose.yml and
+# ops/docker-compose.coolify.yml sets its own `command:` (migrate / ingest /
+# serve), which overrides CMD, and label-preserve replaces `entrypoint:`
+# entirely. Run `doctor` explicitly when you want it:
+#   docker run --rm homecsi-server:local doctor
+CMD ["serve"]

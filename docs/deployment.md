@@ -315,14 +315,19 @@ Create a Coolify **Application** resource pointed at this repository:
   Matches `HOMECSI_SERVER_HTTP_PORT` and the `/healthz` healthcheck
   (`server/packages/api/src/routes/health.ts`) — that specific value is a
   fact about this repo, not about Coolify.
-- **Start Command:** `serve` — the bare subcommand, nothing else. This
-  value is **derived from this repo's Dockerfile, not from Coolify**: the
-  image's `ENTRYPOINT` is the fixed exec-form array
-  `["node", "packages/cli/dist/index.js"]`, and a Start Command is
-  *appended* to an exec-form `ENTRYPOINT`, never substituted for it.
-  Writing `node packages/cli/dist/index.js serve` here produces a doubled
-  argv that commander rejects outright. Without an override, the image
-  falls back to its `CMD ["doctor"]` and exits instead of serving.
+- **Start Command: there is no such field, and you do not need one.**
+  **VERIFIED** the hard way: `PATCH /api/v1/applications/{uuid}` with
+  `custom_start_command` is rejected outright by Coolify 4.3.10 —
+  `{"custom_start_command":["This field is not allowed."]}`, HTTP 422 — and
+  the dockerfile build pack's UI offers no equivalent. Coolify runs the built
+  image as-is.
+
+  That is why this repo's `Dockerfile` defaults to `CMD ["serve"]`. It used to
+  be `CMD ["doctor"]`, and the first real Coolify deploy of this project did
+  exactly what that implies: built fine, ran diagnostics, exited 0, and
+  crash-looped ten times until Coolify gave up at `max_restart_count`. If you
+  ever need a different subcommand in a Coolify **Application**, you cannot
+  ask Coolify for it — see the `ingest` section below for what that costs.
 - **Environment variables:** set on this Application's own Environment
   Variables tab — see "Environment variables" below for the full list.
   Include `HOMECSI_CONFIG_PATH=/etc/homecsi/config.yaml` explicitly: the
@@ -384,8 +389,23 @@ below). Do not publish this resource's port to the Internet.
 A second Coolify Application, same repository, same Dockerfile:
 
 - Same Build Pack/Base Directory as `api` above (both **VERIFIED**).
-- **Start Command:** `ingest`. Same derivation logic as `api`'s `serve`
-  above — a fact about this repo's `ENTRYPOINT`, not a new Coolify claim.
+- **The command problem — read this before creating the resource.** `ingest`
+  needs a *different* subcommand from the same image, and as established in
+  the `api` section Coolify's dockerfile build pack cannot override the
+  command at all (HTTP 422, **VERIFIED**). A plain Application built from this
+  Dockerfile will therefore run `serve`, not `ingest`. Three honest options:
+    1. **Run ingest from a Docker Compose resource** instead, where `command:`
+       works normally — `ops/docker-compose.coolify.yml` already defines it.
+       Least new machinery; the two resources then differ in kind.
+    2. **Make the image role-selectable by environment variable** (e.g. the
+       CLI falling back to `$HOMECSI_COMMAND` when argv carries no
+       subcommand, defaulting to `serve`). One small change in
+       `server/packages/cli`, after which one image plus one env var covers
+       every role and Coolify Applications work for all of them. This is the
+       clean fix and is NOT implemented yet.
+    3. A second Dockerfile whose only difference is its `CMD` — rejected
+       here: two image definitions that must never drift is the exact problem
+       moving the Dockerfile to the repo root was meant to avoid.
 - **Port mapping: `5566:5566/udp`.** This is the one setting that differs
   in kind from `api`'s Ports Exposes: UDP ingest does **not** go through
   Coolify's HTTP reverse proxy at all — that proxy only understands
