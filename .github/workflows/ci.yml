@@ -118,7 +118,6 @@ jobs:
           HOMECSI_DATABASE_HOST: db-uuid-placeholder
           HOMECSI_DATABASE_PASSWORD: placeholder
           HOMECSI_SERVER_API_TOKEN: placeholder-token-long-enough
-          HOMECSI_API_APP_UUID: api-app-uuid-placeholder
         run: docker compose -f ops/docker-compose.ingest.yml config
 
       - name: Validate docker-compose.coolify.yml

@@ -473,10 +473,33 @@ allows inbound UDP on the port too - on the reference host that means a
 `DOCKER-USER` rule, see "Restricting the dashboard to a Tailscale tailnet"
 below for how that chain is used there.
 
-`ingest` also needs the same config file mount (`/etc/homecsi/config.yaml`)
-as `api`, for the node PSK registry it authenticates datagrams against, and
-it deliberately does **not** auto-migrate - only the `serve` role does, so the
-two never race.
+`ingest` needs the same node PSK registry as `api`, to authenticate the
+datagrams it receives. Rather than a second copy of that key material, the
+compose file bind-mounts a neutral literal path that is a host-side symlink
+to the file Coolify already manages for the `api` Application:
+
+```sh
+sudo mkdir -p /data/homecsi
+sudo ln -sfn \
+  /data/coolify/applications/<api-app-uuid>/etc/homecsi/config.yaml \
+  /data/homecsi/config.yaml
+```
+
+The path has to be a literal: Coolify's compose parser rejects variable
+substitution anywhere in a volume source (`Invalid volume source: contains
+forbidden character '${'`, VERIFIED), and hardcoding one instance's
+Application UUID into a repository file is worse than a symlink. One file,
+one editor (the `api` resource's Storage tab), so the two roles cannot drift
+onto different keys.
+
+Two things to know about it. Docker bind-mounts the *file*, so the container
+keeps the inode it started with - and Coolify replaces that file rather than
+editing it on every `api` deploy, so **restart ingest after rotating a PSK**
+or it keeps checking against the old registry silently. And if `api` is ever
+recreated, repoint the symlink.
+
+`ingest` deliberately does **not** auto-migrate - only the `serve` role does,
+so the two never race.
 
 ### 4. `label-preserve` as a scheduled task, not a third Application
 
