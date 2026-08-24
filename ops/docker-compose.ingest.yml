@@ -23,7 +23,20 @@
 services:
   ingest:
     build:
-      context: ..
+      # `.` and not `..`, even though this file lives in ops/ and the
+      # Dockerfile is at the repository root. Coolify invokes compose as
+      # `docker compose --project-directory <repo-root> -f ops/<this file>`,
+      # and Compose resolves relative build paths against the PROJECT
+      # DIRECTORY, not against the compose file's own directory. With `..`
+      # the context landed one level above the checkout and the build died
+      # with `failed to read dockerfile: open Dockerfile: no such file or
+      # directory` (VERIFIED).
+      #
+      # This is why CI validates this file with an explicit
+      # `--project-directory .` from the repository root: without it Compose
+      # would default the project directory to ops/ and CI would be checking
+      # a path resolution that Coolify never performs.
+      context: .
       dockerfile: Dockerfile
     # Subcommand only: docker-entrypoint.sh supplies the interpreter and
     # script path, and an explicit `command:` takes its passthrough branch —
