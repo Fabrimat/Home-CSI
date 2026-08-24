@@ -9,19 +9,18 @@ work doesn't have to be re-derived from scratch.
 
 Manually reflashing 4-9 physically distributed nodes every time firmware
 changes does not scale, especially once nodes are mounted in places that
-are inconvenient to reach. The planned design:
+are inconvenient to reach. **This is no longer entirely future work**: the
+server-side half (manifest staging, authenticated firmware serving, the
+device HTTP surface) ships now (brief B1, see `docs/device-api.md` for the
+full contract), and the node-side OTA client ships alongside it (brief
+B3). What genuinely remains future is image signing — see below.
 
-- **Signed images.** Firmware images are signed (e.g. with ESP-IDF's
-  `esp_secure_boot`/`esp_ota` signing support); nodes verify the signature
-  before accepting an image. An attacker who can reach a node's OTA update
-  path must not be able to push arbitrary code — this matters more here
-  than on a typical IoT gadget because these nodes sit on the same network
-  segment as a device with promiscuous Wi-Fi capture.
 - **`esp_https_ota`.** Nodes pull images over HTTPS from a server-hosted
   manifest + binary, rather than the server pushing to nodes — consistent
   with the "no inbound connections to nodes" posture in
   `docs/architecture.md`. The node initiates the check-and-fetch on its own
-  schedule (or in response to an `OTA_STATUS`-adjacent signal — see below).
+  schedule, using `GET /device/ota/manifest` / `GET /device/ota/firmware`
+  (`docs/device-api.md`) rather than an inbound signal from the server.
 - **A/B partitions with rollback.** ESP-IDF's OTA partition scheme
   (`ota_0`/`ota_1` + an OTA data partition) means a node boots into the new
   image only after it fetches successfully; the bootloader's rollback
@@ -31,15 +30,47 @@ are inconvenient to reach. The planned design:
   to the AP, fails to send a heartbeat within N seconds of boot). A node
   bricked mid-house is a real operational cost, so rollback safety is not
   optional for this feature.
-- **Staged rollout.** New images are pushed to one node first, observed
-  (via heartbeats and CSI flow resuming normally) for a soak period, then
-  rolled out to the rest — rather than flashing all nodes simultaneously
-  and discovering a bug on every unit at once.
-- **`OTA_STATUS` protocol type.** `docs/protocol.md` §8 reserves
-  `msg_type = 4` for this: once implemented, a node reports its current
-  firmware version, the outcome of its last update attempt (success,
-  rollback, fetch failure), and update-eligibility state, so the server can
-  drive and observe a staged rollout without an inbound channel to nodes.
+- **Staged rollout.** The server-side mechanism ships now: `manifest.json`'s
+  `rollout` field (`"all"` or a specific list of node ids — see
+  `docs/device-api.md`) controls which nodes are even offered the staged
+  image at all, and `GET /api/devices` lets an operator watch each node's
+  self-reported status (via `POST /device/hello`) to confirm a rollout is
+  landing cleanly before widening it. The *practice* of pushing to one node
+  first, observing it for a soak period (heartbeats and CSI flow resuming
+  normally), then rolling out to the rest is an operational discipline
+  layered on top of that mechanism, not additional code to write.
+- **`OTA_STATUS` protocol type — stays reserved, not implemented.**
+  `docs/protocol.md` §8 reserves `msg_type = 4` for this. It is **not**
+  being built: node status (firmware version, boot epoch, uptime, OTA
+  state) ships instead over the authenticated device HTTP surface via
+  `POST /device/hello` (`docs/device-api.md`), not over UDP. This is a
+  deliberate fork, not an oversight — putting status on UDP would mean
+  touching `docs/protocol.md`, its golden byte vector
+  (`server/packages/protocol/src/docs-example.test.ts`), and codecs on
+  both the server and firmware sides, which `CLAUDE.md`'s "wire contract
+  lives in exactly two places" rule makes the expensive option for what is
+  fundamentally a telemetry ping. `msg_type = 4` remains reserved (never
+  reused for anything else) in case a genuine future need for UDP-carried
+  status justifies that cost; nothing currently sends it.
+- **Signed images — the one piece still genuinely deferred.** v1's OTA
+  path does not verify image signatures; images are trusted once fetched
+  and hash-checked against the manifest's `sha256` (`docs/device-api.md`).
+  The accurate follow-up path, when this is picked up: post-build signing
+  at publish time via ESP-IDF's `espsecure.py sign_data` against the built
+  `.bin`, plus enabling `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` in the
+  node's build so the running app verifies that signature before accepting
+  an OTA image. Two things this does **not** mean, worth stating precisely
+  because they're easy to get wrong: it does **not** require every
+  developer to hold the signing key (only whoever runs the publish/signing
+  step at release time needs it; an ordinary build has no signing
+  involved and is unaffected), and it does **not** touch serial flashing
+  at all (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` gates OTA image
+  *acceptance* by the running app; without secure boot enabled, the
+  bootloader itself verifies nothing, so flashing over serial during
+  development is unaffected either way). The honest trade-off, deferred
+  until this is picked up: one person manages a signing key, versus a
+  compromised server being able to push arbitrary code to a device with
+  promiscuous Wi-Fi capture privileges sitting inside the home network.
 
 ## Channel hopping (deferred)
 

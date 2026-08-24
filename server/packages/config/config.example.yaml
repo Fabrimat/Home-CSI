@@ -132,3 +132,16 @@ training:
     # Minimum fraction of that baseline's density a window must retain to
     # be treated as healthy. Set to 0 to disable the check entirely.
     minDensityFraction: 0.5
+
+# Optional. Backs the device-facing OTA HTTP surface (docs/device-api.md)
+# that nodes pull their firmware manifest/image from -- separate from the
+# UDP wire protocol, authenticated by a per-node token derived from that
+# node's own `psk` above, never by `server.apiToken`. Omit this whole
+# section to use the built-in default (/data/firmware, the in-container
+# data path -- see ops/docker-compose.yml) -- like `training` above, an
+# unknown or missing key here is NOT a startup error.
+ota:
+  # Directory containing manifest.json plus the firmware image it names.
+  # An operator drops a new manifest.json + image in here to stage a
+  # rollout; no server restart required (docs/device-api.md).
+  firmwareDir: "../data/firmware"

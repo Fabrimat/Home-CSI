@@ -129,6 +129,26 @@ const trainingSchema = z
   })
   .optional();
 
+// Entirely optional, like `training` above and for the same reason: this
+// section was added after the rest of the schema (brief B1, the device
+// OTA HTTP surface -- docs/device-api.md), and @homecsi/api's device
+// routes already have a sane built-in default (DEFAULT_OTA_FIRMWARE_DIR)
+// for when it's omitted. Keeping the whole section optional -- instead of
+// giving `firmwareDir` a zod `.default()` -- keeps `Config` structurally
+// backward compatible for any code that builds a `Config` object literal
+// directly (bypassing loadConfig/zod parsing, e.g. test helpers in
+// sibling packages) without those call sites needing to learn about this
+// key.
+const otaSchema = z
+  .object({
+    // Directory containing manifest.json + the firmware image it names
+    // (docs/device-api.md). Defaults to /data/firmware -- the in-container
+    // data path (ops/docker-compose.yml) -- when this whole section is
+    // omitted.
+    firmwareDir: z.string().min(1),
+  })
+  .optional();
+
 export const configSchema = z.object({
   server: serverSchema,
   database: databaseSchema,
@@ -138,6 +158,7 @@ export const configSchema = z.object({
   occupancy: occupancySchema,
   logging: loggingSchema,
   training: trainingSchema,
+  ota: otaSchema,
 });
 
 export type Config = z.infer<typeof configSchema>;

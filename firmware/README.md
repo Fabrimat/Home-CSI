@@ -43,6 +43,17 @@ for byte (and re-read `docs/protocol.md` at runtime to check it has not
 drifted), and cover nonce construction, ring wrap/overflow, batch flush
 triggers, sequence and epoch exhaustion, and the bandwidth budget.
 
+Two of them check things that are only checkable mechanically:
+
+- `test_device_token.c` pins the OTA/hello bearer token against a hardcoded
+  golden vector that the server's own test hardcodes independently. Two
+  implementations agreeing on one literal is the proof; a shared helper would
+  only prove it agrees with itself.
+- `test_version_sync.c` fails if `main/app_version.h` and CMake's
+  `PROJECT_VER` ever disagree. They are two copies of the same version by
+  necessity — the header is compiled, the image descriptor is stamped by the
+  build system — and `main/ota.c`'s anti-flap check reads the descriptor.
+
 The sources under `components/csi_protocol/` are compiled **both** by the
 ESP-IDF build and by these tests. The layout exists in exactly one place, so
 the firmware cannot drift from what the tests assert.
@@ -89,7 +100,8 @@ removes any chance of a fleet quietly coming up on a default key.
 
 ```bash
 cd firmware/esp32-csi-node/tools
-cp nodes.example.json nodes.json     # edit ids, names, AP, server, allowlist
+cp nodes.example.json nodes.json     # edit ids, names, AP, server, api_base,
+                                     # allowlist
 python provision.py keygen           # 32 bytes per node from the OS CSPRNG
 python provision.py build            # -> secrets/out/nvs_<id>.bin
 python provision.py registry         # -> the server-side node list
@@ -118,6 +130,15 @@ secrets as it creates them, and `firmware/.gitignore` excludes them too — two
 layers, because one is not enough for a key that decrypts a household
 occupancy stream.
 
+**`api_base`** is the HTTPS base URL of the device API — the OTA manifest, the
+firmware image and the hello telemetry ping (e.g.
+`https://homecsi.example.com`). It is **not** `server_host`/`server_port`,
+which is the raw UDP CSI ingest target: one is a TLS web endpoint, the other a
+UDP socket, and in a real deployment they are different ports and may be
+different hosts. It must start with `https://` — the node refuses plain HTTP,
+because the bearer token and the firmware image both cross that connection.
+Omit it to run without OTA; see [OTA auto-update](#ota-auto-update).
+
 **The allowlist** is the other nodes' STA MACs. It is how a node tells a peer
 sounding (the primary signal) from a neighbour's laptop (garnish), and it is
 what the two bandwidth budgets key off. You will not know the MACs until each
@@ -128,6 +149,27 @@ MACs, then re-provision.
 ---
 
 ## Build and flash
+
+> ### Check the flash size first. Once, per board.
+>
+> ```bash
+> esptool.py --port COM5 flash_id     # look for "Detected flash size"
+> ```
+>
+> **`partitions.csv` needs a 4 MB part and will not boot on a 2 MB one.** It is
+> an A/B OTA layout — `otadata` + two full 1920 KB application slots — and two
+> copies of the app plus its metadata do not fit in 2 MB at any sane app size.
+> This is a hardware prerequisite, not a tuning knob.
+>
+> The Halocode's flash size has never been verified by this project. Up to
+> v0.1.0 the table was deliberately sized for 2 MB *because* nobody had looked.
+> Look now, on the bench, with a USB cable in your hand — not after the node is
+> screwed to a wall.
+>
+> If a board really does turn out to be 2 MB: it can still run this firmware,
+> minus OTA. Restore the single-`factory` table from git history and set
+> `CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y`. Everything except auto-update behaves
+> identically.
 
 ```bash
 cd firmware/esp32-csi-node
@@ -158,7 +200,140 @@ resets the boot epoch, which the server treats as a rollback. See
 | `CONFIG_HCS_RING_SLOTS` | 64 | RAM is roughly `slots x (CSI_MAX_LEN + 32)`; 64 x 416 is about 26 kB, statically allocated. |
 | `CONFIG_HCS_SOUNDING_INTERVAL_MS` | 100 | 10 Hz per node. See [the sounding mesh](#the-sounding-mesh). |
 | `CONFIG_HCS_ALLOW_KCONFIG_FALLBACK` | y | Turn **off** for production images. |
+| `CONFIG_HCS_OTA_CHECK_INTERVAL_S` | 3600 | How often a node asks whether there is a new image. Hourly is plenty; a rollout is measured in soak hours. |
 | LED backend | `none` | The LED pin is unverified; see [Status LED](#status-led). |
+
+---
+
+## OTA auto-update
+
+Reflashing 4–9 nodes by hand every time the firmware changes does not scale,
+and some of them are mounted where a USB cable does not reach. So nodes pull
+their own updates.
+
+**Nodes pull; the server never pushes.** There is no inbound connection to a
+node, ever — consistent with the posture in `docs/architecture.md`. A node
+asks, decides for itself, and reboots itself.
+
+### What a node does
+
+```
+POST /device/hello          every 5 min   version, boot epoch, uptime, OTA state
+GET  /device/ota/manifest   every 1 h     {version, sizeBytes, sha256}, or 204
+GET  /device/ota/firmware   on demand     the raw image
+```
+
+All three carry `Authorization: Bearer <device_token>`, where
+
+```
+device_token = base64url_nopad(HMAC-SHA256(psk_raw_32_bytes, "homecsi-device-v1"))
+```
+
+**No new secret and no new provisioning step**: the token is a one-way function
+of the per-node PSK that is already in NVS. A board that can seal a CSI
+datagram can already authenticate to the device API. The derivation lives in
+`components/csi_protocol/device_token.c` — shared with the host tests, like
+everything else that has to match the server byte for byte — and is pinned by a
+hardcoded golden vector in `tests/test_device_token.c` that the server's own
+test hardcodes too. If the two ever disagree, both tests fail loudly instead of
+every node quietly collecting 401s.
+
+### The server does not decide whether you update. You do.
+
+The manifest is unfiltered except for rollout membership. Every
+"should I take this?" rule is on the node, in `main/ota.c`, because the node is
+the only party that knows what it is running and what has already failed on it:
+
+- `204` → nothing published for this node.
+- `manifest.version` equals the running version → nothing to do.
+- **`manifest.version` equals the version in the slot the bootloader already
+  marked invalid → refuse.** This is the anti-flap rule and it is the one that
+  bites in the field. Without it, a node that downloads vN, boots it, fails its
+  health checkpoint and rolls back will find the manifest *still* advertising
+  vN — the server has no idea the node hated it — and will loop
+  download → flash → boot → rollback → download forever. It keeps sending
+  heartbeats from the rolled-back image the whole time, so it looks perfectly
+  alive while burning flash write cycles behind a wall. To retry, publish a
+  **new version number**; the version string is the only thing either side can
+  compare.
+
+### Rollback and the health checkpoint
+
+`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, so a newly installed image boots as
+`PENDING_VERIFY` and the bootloader reverts to the other slot on the next
+reboot **unless the app confirms itself**. A node confirms only after it has
+
+1. associated to the dedicated AP, **and**
+2. put at least one UDP `HEARTBEAT` on the wire.
+
+That is the node doing its actual job, and it exercises Wi-Fi, DHCP, DNS,
+crypto and the uplink path.
+
+**The HTTPS hello is deliberately not part of that condition.** If it were, one
+expired TLS certificate or one bad deploy of the device API would make every
+node in the fleet decline to confirm and roll back — off firmware that was
+working perfectly. A fleet-wide revert triggered by an unrelated web outage is
+a worse failure than the one rollback exists to prevent.
+
+### Publishing an image
+
+The server serves a directory containing the built `.bin` and a
+`manifest.json` beside it (sibling brief B1 owns that half):
+
+```bash
+cd firmware/esp32-csi-node
+# bump BOTH main/app_version.h and PROJECT_VER in CMakeLists.txt
+# (tests/test_version_sync.c fails if you only do one)
+idf.py build
+sha256sum build/esp32-csi-node.bin
+```
+
+```json
+{ "version": "0.2.0", "sizeBytes": 812336, "sha256": "9f86d0…" }
+```
+
+Before switching the boot partition, the node reads the written partition back
+and checks its SHA-256 against the manifest. Being precise about what that
+catches, because it is easy to oversell:
+
+- **Not** transit corruption or tampering — TLS covers that, better.
+- **Not** a corrupt or truncated image — `esp_ota_end()` already ran
+  `esp_image_verify()` over what landed in flash.
+- **An operator mistake**: a `.bin` and a `manifest.json` in that directory
+  that do not belong together. Copy in a new binary without regenerating the
+  manifest (or half a `scp`) and every other check still passes — the image is
+  intact, it is just not the image the rollout says it is. Those two files are
+  maintained by hand, so cross-checking them against each other is worth one
+  partition read per install.
+
+Roll out to **one** node first, watch its heartbeats and CSI flow for a soak
+period, then the rest. The `otaState` in each hello is what makes that
+observable: `up-to-date`, `downloading`, `download-failed`,
+`installed-pending-reboot`, `pending-verify`, `confirmed`, `rolled-back`,
+`disabled`. `rolled-back` is sticky against routine polls — a node that
+reverted must not look healthy again just because its next manifest check said
+"nothing to do".
+
+### Images are not signed yet
+
+They are not, and it would not be hard — so no pretending otherwise. The
+follow-up path is post-build signing at publish time
+(`espsecure.py sign_data --version 2 --keyfile …`) with
+`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
+`CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` gating OTA acceptance in the
+running app. That does **not** require developers to hold the signing key, does
+**not** need secure boot or an eFuse burn, and does **not** affect serial
+flashing. Until it is done, an image is trusted because it arrived over TLS
+from a server whose certificate validated, plus the manifest hash cross-check
+above. That is weaker than a signature. It is stated here rather than glossed
+over.
+
+### Turning it off
+
+Leave `api_base` out of `nodes.json` (or empty) and OTA is off: the node logs
+one line saying why, and captures and uplinks exactly as before. Every board
+provisioned before this feature existed is already in that state, and it is not
+a fault — `node_config_is_deployable()` does not look at `api_base`.
 
 ---
 
@@ -385,7 +560,13 @@ pass and are real; nothing else has been executed.** Specifically:
 | Not verified | Where it is parameterised / how it fails |
 |---|---|
 | The firmware compiles under ESP-IDF | No toolchain was available. Expect to fix symbol renames between IDF versions before it builds |
-| Halocode flash size | `partitions.csv`, sized for the smallest plausible 2 MB part; `esptool.py flash_id` gives the truth |
+| **Halocode flash size — now load-bearing** | `partitions.csv` requires **4 MB** for its A/B OTA layout and will not boot on a 2 MB part. `esptool.py flash_id` gives the truth, and it is the first thing to run. The fallback is the single-`factory` 2 MB table in git history, which costs you OTA and nothing else |
+| That a `factory`-less A/B table boots, and that `idf.py flash` targets `ota_0` | `partitions.csv` has `ota_0`/`ota_1` and no `factory`. ESP-IDF documents booting the first OTA slot when otadata is empty and there is no factory app, but nothing here has confirmed it. If it turns out otherwise the symptom is immediate and on the bench: the first flash does not boot at all |
+| Every ESP-IDF call in `main/ota.c` | `esp_ota_*`, `esp_http_client_*`, `esp_crt_bundle_attach`, `cJSON`, `mbedtls_md_*`. Written against the v5.x API and never compiled. `esp_app_desc.h` in particular has moved between IDF versions |
+| That `esp_ota_end()` flushes the last bytes before the SHA-256 read-back | The read-back sits between `esp_ota_end()` and `esp_ota_set_boot_partition()` precisely because of this. If it turns out bytes are still buffered at that point, the symptom is safe and obvious: the hash mismatches, the node refuses the image, and it logs exactly that. It never installs something unverified |
+| The OTA partition-table symbols in `sdkconfig.defaults` | `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE`, `CONFIG_ESPTOOLPY_FLASHSIZE_4MB`. Same caveat as the rest of that file: v5.x names, unvalidated by a build |
+| A real download / rollback / anti-flap cycle | Nothing here has fetched a byte. The token derivation, the base64url encoding and the version single-source rule **are** covered by host tests; the HTTP, TLS, flash and bootloader paths are not testable without hardware |
+| Whether 8 kB of stack is enough for a TLS handshake here | `OTA_TASK_STACK` in `main/ota.c`. Too small shows up as a stack-overflow panic on the first manifest fetch, not as corruption |
 | CSI record lengths | `CONFIG_HCS_CSI_MAX_LEN` (default 384). Wrong values show as the `oversize` counter, never as corruption |
 | `csi_format` classification | `classify_format()` in `csi_capture.c`. A wrong tag degrades interpretation but never desynchronises a batch, because consumers parse by `csi_len` |
 | LED chip and GPIO | Kconfig; backend defaults to `none` |

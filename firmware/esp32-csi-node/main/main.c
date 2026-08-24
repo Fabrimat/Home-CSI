@@ -13,7 +13,11 @@
  *   7. time_sync         - non-blocking; capture never waits for it
  *   8. sounding          - broadcast mesh transmitter
  *   9. net_uplink        - consumer task; owns the shared seq counter
- *  10. supervisor loop   - this task; feeds the WDT and applies the recovery
+ *  10. ota              - LAST, on purpose. It is the only optional
+ *                          subsystem, and its post-update health checkpoint
+ *                          waits for (9) to have sent a heartbeat, so
+ *                          starting it any earlier would only block sooner
+ *  11. supervisor loop   - this task; feeds the WDT and applies the recovery
  *                          policy below
  *
  * ============================ RECOVERY POLICY ============================
@@ -62,6 +66,7 @@
 #include "heartbeat.h"
 #include "net_uplink.h"
 #include "node_config.h"
+#include "ota.h"
 #include "sounding.h"
 #include "status_led.h"
 #include "time_sync.h"
@@ -206,8 +211,14 @@ void app_main(void)
     /* 9 */
     ESP_ERROR_CHECK(net_uplink_start(&s_cfg, boot_epoch));
 
+    /* 10 - deliberately NOT ESP_ERROR_CHECK'd beyond task creation: a node
+     * that cannot auto-update is still a node that captures CSI, and OTA must
+     * never be a reason to refuse to run. ota_start() logs its own reason if
+     * api_base is missing. */
+    (void)ota_start(&s_cfg);
+
     ESP_LOGI(TAG, "startup complete; supervisor running");
 
-    /* 10 */
+    /* 11 */
     supervisor_loop();
 }

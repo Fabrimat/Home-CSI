@@ -217,6 +217,12 @@ def build_csv(doc: dict, node: dict, key_b64: str) -> str:
         ("channel", "data", "u8", str(merged(doc, node, "channel", 6))),
         ("sntp_srv", "data", "string",
          str(merged(doc, node, "sntp_server", "pool.ntp.org"))),
+        # HTTPS base URL of the device API (OTA manifest/firmware + the hello
+        # telemetry ping). A DIFFERENT thing from srv_host/srv_port above,
+        # which is the raw UDP CSI ingest target. Leave it empty and the row
+        # is dropped below, which the firmware reads as "OTA disabled" - the
+        # state every board provisioned before OTA existed is already in.
+        ("api_base", "data", "string", str(merged(doc, node, "api_base", ""))),
         ("snd_ms", "data", "u32", str(merged(doc, node, "sounding_interval_ms", 100))),
         ("snd_jit", "data", "u8", str(merged(doc, node, "sounding_jitter_pct", 25))),
         ("rssi_floor", "data", "i8", str(merged(doc, node, "rssi_floor_dbm", -85))),

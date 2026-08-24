@@ -10,6 +10,7 @@ idf_component_register(
         "csi_batcher.c"
         "bw_budget.c"
         "seq_epoch.c"
+        "device_token.c"
     INCLUDE_DIRS "include"
 )
 

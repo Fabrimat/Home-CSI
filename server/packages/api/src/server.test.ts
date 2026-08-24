@@ -1,7 +1,9 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { buildApp } from './server.js';
+import { attachLiveAndStatic, buildApp } from './server.js';
 import { FakeHomeCsiDb } from './testUtils/fakeDb.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,6 +16,17 @@ function makeApp(db = new FakeHomeCsiDb()) {
 
 function authHeader(token = API_TOKEN) {
   return { authorization: `Bearer ${token}` };
+}
+
+/**
+ * Percent-encodes the leading `a` of `/api/...` (`%61` = `a`) -- the router
+ * still decodes this back to the real `/api/...` route and matches/runs its
+ * handler, but a hook gating on the *raw* `request.url` sees `/%61pi/...`
+ * and misses it entirely. Reproduces the auth-bypass this file's hook must
+ * not be vulnerable to (see server.ts's `/api/*` onRequest hook comment).
+ */
+function percentEncodeApiPrefix(url: string): string {
+  return `/%61pi${url.slice('/api'.length)}`;
 }
 
 describe('health route (unauthenticated)', () => {
@@ -80,7 +93,47 @@ describe('bearer auth on every /api/* route', () => {
       const res = await app.inject({ method: route.method, url: route.url, headers: authHeader() });
       expect(res.statusCode).toBeLessThan(400);
     });
+
+    it(`rejects ${route.method} ${percentEncodeApiPrefix(route.url)} (percent-encoded prefix) with no Authorization header`, async () => {
+      const { app } = makeApp();
+      const res = await app.inject({ method: route.method, url: percentEncodeApiPrefix(route.url) });
+      expect(res.statusCode).toBe(401);
+    });
   }
+});
+
+describe('a nonexistent /api/* path', () => {
+  // Deliberate, pinned behaviour: the auth hook gates on the *matched
+  // route*, not the raw URL (see server.ts), so a path that matches no
+  // route at all never reaches the hook's own 401 -- Fastify's normal
+  // not-found handling answers instead. Nothing sensitive leaks (no route
+  // handler ever runs for a 404), so this is fine; it's pinned here so a
+  // future "fix" doesn't quietly reintroduce the raw-URL gate that made
+  // percent-encoded paths bypass auth entirely (see the percent-encoded
+  // tests above).
+  it('responds 404, not 401, for a path under /api/ that matches no route', async () => {
+    const { app } = makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/this-route-does-not-exist' });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('static assets (no auth realm) still serve without a token', () => {
+  it('serves a real file under webAssetsDir with no Authorization header', async () => {
+    const webAssetsDir = mkdtempSync(path.join(tmpdir(), 'homecsi-web-assets-test-'));
+    writeFileSync(path.join(webAssetsDir, 'index.html'), '<html>dashboard</html>');
+    const db = new FakeHomeCsiDb();
+    const app = buildApp({ db, apiToken: API_TOKEN, webAssetsDir });
+    await attachLiveAndStatic(app, { db, apiToken: API_TOKEN, webAssetsDir });
+    await app.ready();
+
+    const res = await app.inject({ method: 'GET', url: '/' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('dashboard');
+
+    await app.close();
+    rmSync(webAssetsDir, { recursive: true, force: true });
+  });
 });
 
 describe('input validation', () => {

@@ -8,7 +8,9 @@ import {
   type PreservationConfig,
 } from '@homecsi/labeling';
 import { getWebAssetsDir } from '@homecsi/web';
+import { DeviceTokenRegistry } from './deviceAuth.js';
 import type { ClientConfig } from './routes/config.js';
+import { DEFAULT_OTA_FIRMWARE_DIR, DeviceHelloStore } from './routes/device.js';
 import { PgHomeCsiDb } from './db/pgDb.js';
 import { createAppLogger } from './logs/logger.js';
 import { attachLiveAndStatic, buildApp } from './server.js';
@@ -56,6 +58,13 @@ export async function startServer(config: Config): Promise<void> {
     retentionSafetyMarginMs: DEFAULT_RETENTION_SAFETY_MARGIN_MS,
   };
 
+  // Device-facing OTA HTTP surface (docs/device-api.md) -- its own auth
+  // realm, built once from config.nodes so a duplicated PSK fails startup
+  // loudly (see deviceAuth.ts) rather than silently conflating two nodes.
+  const deviceTokenRegistry = new DeviceTokenRegistry(config.nodes);
+  const otaFirmwareDir = config.ota?.firmwareDir ?? DEFAULT_OTA_FIRMWARE_DIR;
+  const deviceHelloStore = new DeviceHelloStore();
+
   const app = buildApp({
     db,
     apiToken: config.server.apiToken,
@@ -64,6 +73,9 @@ export async function startServer(config: Config): Promise<void> {
     ringBuffer,
     labelPreservation,
     clientConfig,
+    deviceTokenRegistry,
+    otaFirmwareDir,
+    deviceHelloStore,
   });
   await attachLiveAndStatic(app, {
     db,
@@ -73,6 +85,9 @@ export async function startServer(config: Config): Promise<void> {
     ringBuffer,
     labelPreservation,
     clientConfig,
+    deviceTokenRegistry,
+    otaFirmwareDir,
+    deviceHelloStore,
   });
 
   try {

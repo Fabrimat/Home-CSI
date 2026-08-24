@@ -68,9 +68,9 @@ x-app-env: &app-env
 
 # Read-only bind mount of the operator's filled-in config.yaml (see the
 # header comment above and config.production.example.yaml) into every
-# service that runs the CLI. Never baked into the image (ops/Dockerfile
-# never COPYs it, and ops/Dockerfile.dockerignore excludes the whole
-# `ops/` directory from the build context) — it holds real per-node PSKs
+# service that runs the CLI. Never baked into the image (the root
+# Dockerfile never COPYs it, and .dockerignore excludes the whole `ops/`
+# directory from the build context) — it holds real per-node PSKs
 # and must come from the host at run time only. A single scalar anchor
 # (not a list) so it can sit alongside each service's other `volumes:`
 # entries — YAML has no clean way to merge two sequences via anchors the
@@ -177,7 +177,7 @@ services:
   migrate:
     build:
       context: ..
-      dockerfile: ops/Dockerfile
+      dockerfile: Dockerfile
     image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
     # Just the subcommand: the image's exec-form ENTRYPOINT already supplies
     # `node packages/cli/dist/index.js`, and a compose `command:` is APPENDED
@@ -206,7 +206,7 @@ services:
   ingest:
     build:
       context: ..
-      dockerfile: ops/Dockerfile
+      dockerfile: Dockerfile
     image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
     command: ["ingest"] # subcommand only - see the migrate service above
     restart: unless-stopped
@@ -248,7 +248,7 @@ services:
   api:
     build:
       context: ..
-      dockerfile: ops/Dockerfile
+      dockerfile: Dockerfile
     image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
     command: ["serve"] # subcommand only - see the migrate service above
     restart: unless-stopped
@@ -261,7 +261,7 @@ services:
         condition: service_completed_successfully
     healthcheck:
       # No curl/wget in the node:20-bookworm-slim runtime image (see
-      # ops/Dockerfile) - use Node's own built-in `fetch` instead of adding
+      # Dockerfile) - use Node's own built-in `fetch` instead of adding
       # a package just for this. Exec form (no shell) so quoting the JS is
       # simple and no `/bin/sh` dependency is introduced either.
       # `/healthz` (server/packages/api/src/routes/health.ts) is
@@ -305,13 +305,13 @@ services:
   label-preserve:
     build:
       context: ..
-      dockerfile: ops/Dockerfile
+      dockerfile: Dockerfile
     image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
     # Overrides the image's `ENTRYPOINT ["node", "packages/cli/dist/index.js"]`
     # entirely (compose `entrypoint:` replaces, unlike `command:` which
     # appends) so this service can run a scheduling loop around the CLI
     # instead of a single CLI invocation. There is no cron daemon in the
-    # node:20-bookworm-slim runtime image (see ops/Dockerfile) and adding
+    # node:20-bookworm-slim runtime image (see Dockerfile) and adding
     # one is unnecessary complexity for "run this one command once a day" -
     # a plain shell loop with `sleep` is the honest, minimal tool.
     entrypoint: ["/bin/sh", "-c"]

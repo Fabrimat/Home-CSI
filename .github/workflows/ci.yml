@@ -79,12 +79,51 @@ jobs:
         run: cp ops/.env.example ops/.env
 
       - name: Build Docker image
-        # Build from repo root (the build context must be the repo root).
-        # ops/Dockerfile documents at length why: it needs to COPY server/
-        # and firmware/ into the image, which only works if the context is
-        # the repo root. ops/docker-compose.yml sets build.context: .. for
-        # the same reason.
-        run: docker build -f ops/Dockerfile .
+        # Build from repo root: the build context MUST be the repo root, because
+        # npm workspaces need every workspace package.json visible under a common
+        # root for `npm ci` to resolve the internal server/packages/* deps. The
+        # image copies server/ only -- firmware/, ops/ and docs/ are excluded by
+        # .dockerignore. ops/docker-compose.yml sets build.context: .. for the
+        # same reason, and the Dockerfile lives at the repo root because
+        # Coolify's build pack offers only a Base Directory (see its header).
+        run: docker build -f Dockerfile .
 
       - name: Validate docker-compose.yml
         run: docker compose -f ops/docker-compose.yml config
+
+      - name: Validate docker-compose.coolify.yml
+        # The Coolify deployment path's compose file (docs/deployment.md).
+        # Validated here for the same reason as the one above: this repo has a
+        # documented history of ops/ drifting from the code it configures, and
+        # an unvalidated second compose file is exactly how that resumes.
+        run: docker compose -f ops/docker-compose.coolify.yml config
+
+  firmware:
+    # Host tests for the firmware's hardware-independent sources. No ESP32 and
+    # no ESP-IDF involved: firmware/tests compiles the SAME files the firmware
+    # build compiles, with a plain host C compiler (see its Makefile header).
+    #
+    # This job exists so the two-implementation agreements this repo leans on
+    # are enforced mechanically instead of by whoever remembers to run the
+    # suite locally:
+    #   - test_device_token.c and server's packages/api deviceAuth.test.ts
+    #     hardcode the SAME device-token golden vector, which is the only
+    #     thing proving server and firmware derive an identical bearer token
+    #     (docs/device-api.md). A silent divergence here means every node
+    #     fails OTA auth in the field.
+    #   - test_docs_example.c and packages/protocol's docs-example.test.ts
+    #     check docs/protocol.md's worked example from two languages.
+    #   - test_version_sync.c fails if main/app_version.h and CMake's
+    #     PROJECT_VER disagree, which the OTA anti-flap check depends on.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run firmware host tests
+        # run_tests.py (not make) because it is the runner that works on every
+        # dev box including Windows on ARM64; it picks up $CC, else cc/gcc/clang,
+        # all of which ubuntu-latest already has.
+        working-directory: firmware/tests
+        run: python3 run_tests.py

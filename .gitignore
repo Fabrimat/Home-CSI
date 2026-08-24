@@ -39,7 +39,7 @@ data/**
 .DS_Store
 Thumbs.db
 
-# Vite build output for the debug UI (built by ops/Dockerfile and
+# Vite build output for the debug UI (built by Dockerfile and
 # `npm run build --workspace=@homecsi/web`; never committed).
 ui-dist/
 

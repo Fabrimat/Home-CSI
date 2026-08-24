@@ -4,10 +4,12 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import { DEFAULT_RETENTION_SAFETY_MARGIN_MS } from '@homecsi/labeling';
 import { extractBearerToken, tokensMatch } from './auth.js';
+import { DeviceTokenRegistry } from './deviceAuth.js';
 import type { HomeCsiDb } from './db/types.js';
 import { LiveHub } from './live/hub.js';
 import { registerCsiRoutes } from './routes/csi.js';
 import { DEFAULT_RETENTION_MAX_AGE_MS, registerConfigRoutes, type ClientConfig } from './routes/config.js';
+import { DEFAULT_OTA_FIRMWARE_DIR, DeviceHelloStore, registerDeviceRoutes } from './routes/device.js';
 import { registerFeatureRoutes } from './routes/features.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerLabelRoutes, type LabelPreservationDeps } from './routes/labels.js';
@@ -45,6 +47,26 @@ export interface BuildAppOptions {
    * real values from `config.storage.retention`.
    */
   clientConfig?: ClientConfig;
+  /**
+   * Resolves a `/device/*` bearer token (see deviceAuth.ts) to a node id.
+   * Defaults to an empty registry -- with no nodes configured, nothing can
+   * ever authenticate, so an omitted registry leaves `/device/*` closed
+   * rather than silently open. `startServer` always supplies the real one,
+   * built from `config.nodes`.
+   */
+  deviceTokenRegistry?: DeviceTokenRegistry;
+  /**
+   * OTA artifact directory backing `/device/ota/*` (routes/device.ts).
+   * Defaults to `DEFAULT_OTA_FIRMWARE_DIR`, matching `config.ota`'s own
+   * default (packages/config/src/schema.ts) for when that optional section
+   * is omitted.
+   */
+  otaFirmwareDir?: string;
+  /**
+   * In-memory `POST /device/hello` state backing `/api/devices`. Defaults
+   * to a fresh, empty store for tests that don't care about it.
+   */
+  deviceHelloStore?: DeviceHelloStore;
 }
 
 /**
@@ -57,13 +79,68 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   // --- auth: every /api/* route except the WebSocket upgrade itself, which
   // authenticates via its own first-message protocol because browsers
-  // cannot set a custom header on a WS handshake (see routes/ws.ts). ---
+  // cannot set a custom header on a WS handshake (see routes/ws.ts).
+  //
+  // Gated on the *matched route pattern* (request.routeOptions.url), never
+  // on the raw request.url. onRequest hooks run after routing in Fastify 5,
+  // so the router has already decoded any percent-encoding and matched the
+  // real route by the time this runs -- but request.url is still the raw,
+  // undecoded string. Gating on it let a client skip this hook entirely by
+  // percent-encoding one character of the path (e.g. `/%61pi/nodes`): the
+  // router still decoded and matched `/api/nodes`'s handler and ran it
+  // unauthenticated, while this hook's `startsWith('/api/')` check saw
+  // `/%61pi/nodes` and didn't match -- a real, remotely-exploitable auth
+  // bypass (reverse proxies forward encoded octets through untouched), not
+  // a theoretical one.
+  //
+  // Side effect, chosen deliberately: request.routeOptions.url is undefined
+  // for a request that matches no route at all, so an unmatched /api/*
+  // path now falls through this hook and gets Fastify's normal 404
+  // (instead of the 401 it got before, when this hook pattern-matched the
+  // raw URL regardless of whether a route existed). No handler ever runs
+  // for a 404, so nothing sensitive is exposed -- it only reveals that a
+  // given path isn't a route, and the dashboard's own bundled JS already
+  // tells any caller the full route list anyway. Pinned by a test in
+  // server.test.ts ("responds 404, not 401, for a nonexistent /api/* path").
   app.addHook('onRequest', async (request, reply) => {
-    if (!request.url.startsWith('/api/') || request.url.startsWith('/api/ws')) return;
+    const routeUrl = request.routeOptions.url;
+    if (!routeUrl || !routeUrl.startsWith('/api/') || routeUrl.startsWith('/api/ws')) return;
     const token = extractBearerToken(request.headers.authorization);
     if (!token || !tokensMatch(token, options.apiToken)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
+    return undefined;
+  });
+
+  // --- a second, entirely separate auth realm for /device/*, isolated from
+  // /api/*'s apiToken hook above in both directions: this hook never fires
+  // for /api/* (so a device token can never be checked against it), and
+  // the /api/* hook above already returns early for anything not starting
+  // with /api/ (so it never validates a device-realm request either). A
+  // device bearer token is per-node (see deviceAuth.ts), never the shared
+  // dashboard apiToken -- resolving it also tells each /device/* route
+  // which node is calling (request.deviceNodeId).
+  //
+  // Also gated on request.routeOptions.url, not request.url, for the same
+  // percent-encoding-bypass reason as the /api/* hook above -- and so the
+  // two realms can't drift onto different (and differently exploitable)
+  // gating strategies. This realm doesn't strictly need it: every
+  // /device/* handler independently 401s when request.deviceNodeId is
+  // still null (defense in depth, see routes/device.ts), so a raw-URL
+  // bypass of *this* hook would still hit a handler-level 401, not leak
+  // data -- but there's no reason to leave the weaker check in place once
+  // the shared reason to avoid it is known. ---
+  const deviceTokenRegistry = options.deviceTokenRegistry ?? new DeviceTokenRegistry([]);
+  app.decorateRequest('deviceNodeId', null);
+  app.addHook('onRequest', async (request, reply) => {
+    const routeUrl = request.routeOptions.url;
+    if (!routeUrl || !routeUrl.startsWith('/device/')) return;
+    const token = extractBearerToken(request.headers.authorization);
+    const nodeId = token === null ? null : deviceTokenRegistry.resolve(token);
+    if (nodeId === null) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    request.deviceNodeId = nodeId;
     return undefined;
   });
 
@@ -84,6 +161,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerFeatureRoutes(app, options.db);
   registerOccupancyRoutes(app, options.db);
   registerLabelRoutes(app, options.db, options.labelPreservation);
+  registerDeviceRoutes(app, {
+    firmwareDir: options.otaFirmwareDir ?? DEFAULT_OTA_FIRMWARE_DIR,
+    helloStore: options.deviceHelloStore ?? new DeviceHelloStore(),
+  });
   registerConfigRoutes(
     app,
     options.clientConfig ?? {

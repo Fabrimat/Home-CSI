@@ -194,6 +194,43 @@ config HCS_RECONNECT_REBOOT_S
 
 endmenu
 
+menu "OTA auto-update"
+
+comment "OTA is off unless the NVS key 'api_base' holds an https:// URL."
+comment "These are timings only; they do not enable or disable anything."
+
+config HCS_OTA_START_DELAY_S
+    int "Wait this long after boot before the first manifest check (seconds)"
+    range 0 86400
+    default 120
+    help
+      A node that has just come up has more useful things to do, and after a
+      power cut the whole mesh boots within a second of each other - an
+      immediate check would have every node hit the server at once.
+
+config HCS_OTA_CHECK_INTERVAL_S
+    int "Manifest check interval (seconds)"
+    range 60 604800
+    default 3600
+    help
+      How often the node asks /device/ota/manifest whether there is anything
+      for it. Hourly is plenty: a rollout is measured in hours of soak time,
+      not minutes. After a failed update attempt this interval is backed off
+      (up to 16x), because every attempt erases and rewrites the inactive
+      flash slot.
+
+config HCS_OTA_HELLO_INTERVAL_S
+    int "Device hello (telemetry) interval (seconds)"
+    range 30 86400
+    default 300
+    help
+      POST /device/hello reports firmware version, boot epoch, uptime and OTA
+      state. It is what makes a staged rollout observable. It is pure
+      telemetry: a failure is a logged warning, and it is deliberately NOT
+      part of the rollback health checkpoint (see main/ota.c).
+
+endmenu
+
 menu "Local debug mode"
 
 config HCS_DEBUG_UART

@@ -1,11 +1,12 @@
-# Sidecar ignore file for ops/Dockerfile.
+# Build-context excludes for the root Dockerfile.
 #
-# BuildKit convention: a file named `<dockerfile-filename>.dockerignore`
-# placed next to a Dockerfile overrides the root `.dockerignore` for builds
-# using that Dockerfile. Because ops/docker-compose.yml sets
-# `build.context: ..` (repo root) and `build.dockerfile: ops/Dockerfile`,
-# this file - not a root-level .dockerignore - is what controls what reaches
-# the build context for this image.
+# This is a plain, classic root-level .dockerignore: the build context is the
+# repository root (this directory), and the Dockerfile sits at the root of it,
+# so Docker finds this file by its ordinary rules - no BuildKit per-Dockerfile
+# sidecar convention involved. It applies to every build from this context,
+# including `docker compose build` (ops/docker-compose.yml sets
+# `context: ..` + `dockerfile: Dockerfile`) and Coolify, which builds from
+# the repository root and offers no way to point at a Dockerfile elsewhere.
 #
 # DO NOT add any pattern here that excludes `server/` or its subpaths. The
 # Dockerfile COPYs from server/ (package.json, package-lock.json,

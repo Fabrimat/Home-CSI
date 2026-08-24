@@ -20,6 +20,7 @@ export const ENV_VAR_PATHS: ReadonlyArray<{ envVar: string; path: readonly strin
   { envVar: 'HOMECSI_DATABASE_SSL', path: ['database', 'ssl'] },
   { envVar: 'HOMECSI_STORAGE_CAPTURE_DIR', path: ['storage', 'captureDir'] },
   { envVar: 'HOMECSI_LOGGING_LEVEL', path: ['logging', 'level'] },
+  { envVar: 'HOMECSI_OTA_FIRMWARE_DIR', path: ['ota', 'firmwareDir'] },
 ];
 
 function setPath(obj: Record<string, unknown>, path: readonly string[], value: string): void {

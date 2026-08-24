@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../../..');
 const composePath = path.join(repoRoot, 'ops', 'docker-compose.yml');
+const composeCoolifyPath = path.join(repoRoot, 'ops', 'docker-compose.coolify.yml');
 
 export interface BadInterpolationSpot {
   line: number;
@@ -85,6 +86,20 @@ describe('ops/docker-compose.yml has no unescaped $ (Compose v2 interpolation)',
       spots,
       spots
         .map((s) => `${composePath}:${s.line}:${s.col}  ${s.context}`)
+        .join('\n'),
+    ).toEqual([]);
+  });
+
+  it('ops/docker-compose.coolify.yml has zero unescaped-$ occurrences', () => {
+    // Same defect class, same `label-preserve` shell-in-YAML shape - see
+    // that service's `command:` block. Not scanning this file would be
+    // exactly the kind of unchecked-promise gap this test exists to close.
+    const text = readFileSync(composeCoolifyPath, 'utf8');
+    const spots = findUnescapedDollars(text);
+    expect(
+      spots,
+      spots
+        .map((s) => `${composeCoolifyPath}:${s.line}:${s.col}  ${s.context}`)
         .join('\n'),
     ).toEqual([]);
   });

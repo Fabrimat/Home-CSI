@@ -74,7 +74,16 @@ function extractFullDatagramBytes(section: string): Buffer {
   // would let `\s*` swallow newlines and merge the next line's 4-digit
   // offset column into the byte stream as spurious extra bytes).
   const lineRe = /^[0-9a-fA-F]{4} {2}((?:[0-9a-fA-F]{2} ?)+)$/;
-  for (const line of section.split('\n')) {
+  // Split on CRLF-or-LF, not LF alone. `.gitattributes` sets `* text=auto`,
+  // so on a Windows checkout (this project's primary dev box -- see
+  // firmware/README.md) every line of docs/protocol.md ends with a carriage
+  // return. Splitting on the newline alone leaves that CR at the end of each
+  // line, where `lineRe`'s `$` anchor cannot match it, so EVERY hex line is
+  // silently skipped and this extractor returns zero bytes -- the assertion
+  // below then fails with "expected 0 to be 101" on Windows while passing on
+  // LF-checkout CI. That made this repo's most load-bearing invariant a
+  // silent no-op for anyone developing on Windows.
+  for (const line of section.split(/\r?\n/)) {
     const match = lineRe.exec(line);
     if (!match) continue;
     const tokens = (match[1] ?? '').trim().split(/ +/).filter(Boolean);

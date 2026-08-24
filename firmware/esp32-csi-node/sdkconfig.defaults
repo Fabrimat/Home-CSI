@@ -14,10 +14,35 @@ CONFIG_IDF_TARGET="esp32"
 # --- partition table ---------------------------------------------------
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-# Smallest plausible flash; see the header of partitions.csv. Raise this only
-# after `esptool.py flash_id` has confirmed a bigger part.
-CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+# 4 MB, because partitions.csv is now an A/B OTA layout (otadata + ota_0 +
+# ota_1) and that does not fit in 2 MB at any sane app size.
+#
+# THIS IS A HARDWARE PREREQUISITE, NOT A TUNING KNOB. Run
+# `esptool.py flash_id` and confirm 4 MB before flashing this to a board; a
+# 2 MB part with this table will not boot. See the header of partitions.csv.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE_DETECT=y
+
+# --- OTA ---------------------------------------------------------------
+# Rollback: a freshly installed image boots as PENDING_VERIFY and the
+# bootloader reverts to the other slot on the next reboot unless the app calls
+# esp_ota_mark_app_valid_cancel_rollback(). main/ota.c calls it only after the
+# node has associated AND sent a heartbeat. Without this symbol a bad image
+# just stays, which for a node behind a wall is the expensive outcome.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# Certificate bundle: gives esp-tls the Mozilla root store so
+# esp_crt_bundle_attach() in main/ota.c can actually validate the server's
+# certificate. Without it there are no trust anchors on the device and the
+# esp_http_client_config_t.crt_bundle_attach field does not even exist.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# HTTPS-only OTA. main/ota.c also refuses an api_base that is not https://,
+# so this is the belt to that braces - it costs nothing and closes the
+# downgrade path if this module is ever moved onto esp_https_ota.
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=n
+# SHA-256 in hardware: used by the image validation inside esp_ota_end() and
+# by the manifest read-back check in main/ota.c, over ~2 MB each time.
+CONFIG_MBEDTLS_HARDWARE_SHA=y
 
 # --- Wi-Fi / CSI -------------------------------------------------------
 # THE reason this project exists. Without it esp_wifi_set_csi() fails.

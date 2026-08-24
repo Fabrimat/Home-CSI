@@ -1,26 +1,22 @@
 # Home CSI — multi-stage image for the Node/TypeScript server monorepo
 # (server/, an npm workspaces monorepo per docs/architecture.md).
 #
-# Build context MUST be the repository root, not ops/ - see
-# `build.context: ..` in ops/docker-compose.yml. This is required because npm
-# workspaces need every workspace package.json visible under a common root
-# to resolve internal (server/packages/*) dependencies during `npm ci`.
+# WHY THIS FILE IS AT THE REPOSITORY ROOT, not in ops/ alongside the rest of
+# the deployment plumbing: the build context MUST be the repository root,
+# because npm workspaces need every workspace package.json visible under a
+# common root to resolve internal (server/packages/*) dependencies during
+# `npm ci`. Coolify's Dockerfile build pack takes only a Base Directory and
+# looks for a Dockerfile at the root of it, with no separate "Dockerfile
+# location" field - so a Dockerfile under ops/ is unreachable to it, and
+# pointing Base Directory at ops/ would drop server/ out of the context and
+# fail on the first COPY. Keeping one Dockerfile here, referenced by
+# ops/docker-compose.yml as `context: ..` + `dockerfile: Dockerfile`, is what
+# lets the compose path and Coolify share a single image definition instead
+# of two copies that must never drift.
 #
-# IMPORTANT — .dockerignore location:
-# Because the build context is the repo root, Docker's classic behavior would
-# look for a file literally named `.dockerignore` at the *root* of that
-# context (i.e. the repository root), not next to this Dockerfile. This repo
-# does not have (and this brief does not own/create) a root-level
-# .dockerignore. Instead, this build relies on BuildKit's per-Dockerfile
-# ignore-file convention: a file named `<dockerfile-filename>.dockerignore`
-# placed next to the Dockerfile - i.e. `ops/Dockerfile.dockerignore` - takes
-# precedence over any root .dockerignore for builds using this Dockerfile.
-# This requires BuildKit, which is the default for `docker build` / `docker
-# compose build` on any reasonably current Docker Engine/Desktop (18.09+,
-# enabled by default since ~2021 releases; force it with
-# `DOCKER_BUILDKIT=1` on an older install if needed).
-# See ops/Dockerfile.dockerignore for the actual excludes and why `server/`
-# is never among them.
+# Excludes live in the root .dockerignore (plain classic behaviour, since
+# this Dockerfile is at the context root) - see it for what is excluded and
+# why `server/` is never among them.
 #
 # server/ layout (verified against the actual monorepo, not assumed):
 #   - server/package.json + server/package-lock.json define an npm

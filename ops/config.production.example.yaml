@@ -36,7 +36,7 @@
 #      hence the placeholders are schema-shaped junk, not empty strings.
 #   4. `chmod 600 ops/config.yaml` and `chown 10001:10001 ops/config.yaml`
 #      — it holds real per-node key material once step 2 is done. 10001 is
-#      the fixed, non-root UID/GID `ops/Dockerfile` assigns its runtime
+#      the fixed, non-root UID/GID `Dockerfile` assigns its runtime
 #      `homecsi` user (pinned specifically so this chown target is stable
 #      across rebuilds); without it, the container's non-root process
 #      cannot read a mode-600 file owned by a different host UID.

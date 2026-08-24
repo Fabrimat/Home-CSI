@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { ENV_VAR_PATHS } from './env.js';
 
 /**
- * Drift test for the four-way contract between:
+ * Drift test for the contract between:
  *   - server/packages/config/src/env.ts (`ENV_VAR_PATHS`) — the actual,
  *     authoritative list of HOMECSI_* variables the app reads.
  *   - ops/docker-compose.yml — the primary deployment's env wiring.
+ *   - ops/docker-compose.coolify.yml — the Coolify deployment's env wiring.
  *   - ops/systemd/README.md — the non-Docker deployment's env wiring.
  *   - ops/.env.example — the Docker path's operator-facing env template.
  *
@@ -37,6 +38,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../../..');
 
 const composePath = path.join(repoRoot, 'ops', 'docker-compose.yml');
+const composeCoolifyPath = path.join(repoRoot, 'ops', 'docker-compose.coolify.yml');
 const systemdReadmePath = path.join(repoRoot, 'ops', 'systemd', 'README.md');
 const envExamplePath = path.join(repoRoot, 'ops', '.env.example');
 
@@ -150,6 +152,14 @@ describe('ops/ HOMECSI_* env var names match env.ts (no drift)', () => {
     assertNoDrift(extractHomecsiNames(text), 'ops/docker-compose.yml');
   });
 
+  it('every HOMECSI_* name in ops/docker-compose.coolify.yml is known', () => {
+    // Added alongside the Coolify deployment path (see docs/deployment.md)
+    // - without this, that file would be exactly the kind of unscanned ops
+    // file this test exists to prevent.
+    const text = readFileSync(composeCoolifyPath, 'utf8');
+    assertNoDrift(extractHomecsiNames(text), 'ops/docker-compose.coolify.yml');
+  });
+
   it('every HOMECSI_* name in ops/systemd/README.md is known', () => {
     const text = readFileSync(systemdReadmePath, 'utf8');
     assertNoDrift(extractHomecsiNames(text), 'ops/systemd/README.md');
@@ -179,6 +189,28 @@ describe('ops/ HOMECSI_* env var names match env.ts (no drift)', () => {
       `ops/docker-compose.yml references \${...} for variable(s) ops/.env.example ` +
         `never declares: ${undeclared.join(', ')}. Add a KEY=value line for each to ` +
         `ops/.env.example, or fix the compose file's reference.`,
+    ).toEqual([]);
+  });
+
+  it('every ${HOMECSI_*}/${POSTGRES_*} the Coolify compose file reads is declared in ops/.env.example', () => {
+    // Same check as above, applied to ops/docker-compose.coolify.yml. That
+    // file is not itself read by Coolify (Coolify supplies these at deploy
+    // time via its own per-resource Environment Variables UI - see the
+    // file's header) but ops/.env.example remains the one canonical place
+    // documenting every HOMECSI_*/POSTGRES_* name and how to generate it,
+    // including for operators setting these in Coolify's UI instead of a
+    // `.env` file - so it still must not silently omit one this file uses.
+    const composeCoolifyText = readFileSync(composeCoolifyPath, 'utf8');
+    const envExampleText = readFileSync(envExamplePath, 'utf8');
+    const referenced = extractInterpolatedRefs(composeCoolifyText, /^(HOMECSI|POSTGRES)_/);
+    const declared = extractDeclaredNames(envExampleText);
+    const undeclared = referenced.filter((name) => !declared.has(name));
+    expect(
+      undeclared,
+      `ops/docker-compose.coolify.yml references \${...} for variable(s) ` +
+        `ops/.env.example never declares: ${undeclared.join(', ')}. Add a ` +
+        `KEY=value line for each to ops/.env.example, or fix the compose ` +
+        `file's reference.`,
     ).toEqual([]);
   });
 

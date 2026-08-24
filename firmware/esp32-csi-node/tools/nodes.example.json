@@ -13,7 +13,19 @@
     "and it is what the two separate bandwidth budgets key off. You will not",
     "know the MACs until each board has been booted once -- csi-hello and the",
     "main firmware both print 'STA MAC' on startup. Provision once with an",
-    "empty allowlist, collect the MACs, then re-provision."
+    "empty allowlist, collect the MACs, then re-provision.",
+    "",
+    "'api_base' is the HTTPS base URL of the device API -- the OTA manifest,",
+    "the firmware image, and the /device/hello telemetry ping. It is NOT the",
+    "same thing as 'server_host'/'server_port', which is the raw UDP CSI",
+    "ingest target: one is a TLS web endpoint, the other a UDP socket, and in",
+    "a real deployment they are different ports and may be different hosts.",
+    "It must start with https:// -- the node refuses plain HTTP, because the",
+    "bearer token and the firmware image both cross that connection.",
+    "",
+    "Leave 'api_base' empty (or delete it) to turn OTA auto-update off. The",
+    "node then boots, captures and uplinks exactly as before and says once on",
+    "the console why OTA is off. Nothing else changes."
   ],
 
   "defaults": {
@@ -24,6 +36,7 @@
     "server_host": "ingest.example.com",
     "server_port": 5566,
     "sntp_server": "pool.ntp.org",
+    "api_base": "https://homecsi.example.com",
 
     "sounding_interval_ms": 100,
     "sounding_jitter_pct": 25,

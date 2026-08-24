@@ -1,0 +1,374 @@
+# Home CSI — Coolify deployment: whole-stack-in-one-resource ALTERNATIVE.
+#
+# The PRIMARY Coolify path is documented in docs/deployment.md's "Coolify
+# (self-hosted PaaS)" section: separate Coolify Applications for `api` and
+# `ingest` (each Build Pack Dockerfile, pointed at this repo), a separate
+# Database resource running TimescaleDB, and a scheduled task for
+# `label-preserve` — no compose file involved at all. That is the path an
+# operator actually confirmed against their own Coolify dashboard, on an
+# Application/Dockerfile resource specifically.
+#
+# THIS FILE is for an operator who would rather run the whole stack as one
+# Coolify "Docker Compose" resource instead of five separate Coolify
+# resources. It exists alongside ops/docker-compose.yml, not instead of it
+# — that file (plus ops/Caddyfile and ops/systemd/**) must keep working
+# exactly as documented for anyone not using Coolify. Nothing here
+# replaces either path.
+#
+# IMPORTANT — read the labels below carefully. Every "VERIFIED" claim in
+# this repo's Coolify-facing docs was confirmed on an **Application**
+# resource (see docs/deployment.md's primary section), not a **Docker
+# Compose** resource — a different part of Coolify's UI. Facts that
+# transfer as plain facts about this repo (not about Coolify) are labelled
+# accordingly; anything about how a Docker Compose resource's per-service
+# settings behave is labelled ASSUMED and has NOT been independently
+# checked against a live Coolify deployment of this specific file.
+#
+# Deploy this as a Coolify "Docker Compose" resource:
+#   - Base Directory: / (repo root). Confirmed as a real field, and that
+#     no separate "Dockerfile Location" field exists, on the Application
+#     resource type (docs/deployment.md) — that absence is exactly why the
+#     head moved the Dockerfile to the repo root. Whether a Docker Compose
+#     resource exposes an identically-named "Base Directory" field, and
+#     whether it means the same thing there, is ASSUMED, not confirmed.
+#     What IS solid regardless of resource type: standard Docker Compose
+#     resolves a `context:` path relative to the compose file's own
+#     location, not to a PaaS's "Base Directory" setting (see "What's the
+#     same" below) — so `context: ..` below is correct either way.
+#   - Docker Compose Location: ops/docker-compose.coolify.yml — ASSUMED
+#     field name/label; point it at this file however your Coolify
+#     version asks for the path.
+#   - Whether this resource type even shows per-service Build
+#     Pack/Ports Exposes/Start Command panels the way an Application
+#     resource does, and if so whether they read `Dockerfile`/`8080`/
+#     `serve` for the `api` service the same way — ASSUMED, not
+#     independently confirmed for a Docker Compose resource. If your
+#     Coolify version does show a Start Command override field here, it
+#     must agree with `command: ["serve"]` already declared on `api`
+#     below — never `node packages/cli/dist/index.js serve` (doubled
+#     argv against the image's exec-form `ENTRYPOINT` — a fact about this
+#     repo's Dockerfile, true regardless of Coolify resource type).
+#   - Domain/TLS: Coolify terminates TLS and fronts `api` with its own
+#     reverse proxy — that is why there is no `caddy` service in this file
+#     (see below). Exactly how your Coolify version wires a domain to
+#     whichever container/port serves `api` in a Docker Compose resource
+#     (a "Domains" field, a magic `SERVICE_FQDN_API`-style env var, or
+#     something else) is ASSUMED, not confirmed — check your dashboard.
+#
+# What's different from ops/docker-compose.yml, and why:
+#
+#   - No `caddy` service. Coolify runs its own reverse proxy and terminates
+#     TLS in front of whatever it deploys — running Caddy too would be a
+#     second, redundant, and likely port-conflicting proxy in front of the
+#     same `api` container. ACME/Let's Encrypt config, `ops/Caddyfile`, and
+#     `HOMECSI_DOMAIN`/`HOMECSI_ACME_EMAIL` (the vanilla path's TLS/DNS
+#     inputs) simply do not apply here — see docs/deployment.md's Coolify
+#     section for what to configure instead.
+#   - `/data` (captures, logs, OTA firmware — see the `ota` config section
+#     documented in docs/device-api.md) is a plain named Docker volume
+#     (`homecsi_data`) here, not `${HOMECSI_DATA_DIR}:/data` bind-mounted
+#     from a host path chosen via `.env`. Coolify does not guarantee a
+#     stable, operator-chosen host directory the way a hand-run VPS does;
+#     a named volume is the portable equivalent Coolify itself manages.
+#     One real consequence: firmware publishing (`GET /device/ota/firmware`)
+#     has no host bind mount to drop files into under Coolify — see
+#     docs/deployment.md's Coolify section ("Publishing firmware images")
+#     for the `docker cp`-based v1 answer to that gap.
+#   - `config.yaml` is NOT bind-mounted via a `volumes:` line in this file
+#     at all (contrast ops/docker-compose.yml's `x-config-volume` anchor,
+#     which bind-mounts a relative `./config.yaml` next to that file).
+#     A relative host path like that would not work here: Coolify deploys
+#     from a fresh clone of this repository, and `config.yaml` is
+#     git-ignored by design (it holds real per-node PSKs) — it would never
+#     exist in that checkout. Instead, use Coolify's own per-service
+#     "Storage" → file-mount feature (ASSUMED available under that name in
+#     your Coolify version — some versions call it "File Mount" or
+#     "Persistent Storage: File") on each of `migrate`, `ingest`, `api`, and
+#     `label-preserve`: destination path `/etc/homecsi/config.yaml`,
+#     content = your filled-in copy of `ops/config.production.example.yaml`.
+#     This is deliberately the same end state as the vanilla path's
+#     `x-config-volume` anchor (a read-only file at that exact container
+#     path): a file mount, not an env var, because the per-node PSK
+#     registry has no env override by design, and because stuffing the
+#     whole config into one env var would mean re-encoding the entire file
+#     to rotate one node's PSK, and would land the whole thing in `docker
+#     inspect`/the Coolify UI's env var list in plaintext. Zero new
+#     server-side code is needed for this — it is the exact same "one
+#     read-only file at /etc/homecsi/config.yaml" contract the app already
+#     expects.
+#   - No `HOMECSI_DOMAIN`/`HOMECSI_ACME_EMAIL` anywhere below — those are
+#     Caddy-only inputs (see above) and have no meaning here.
+#
+# What's the same as ops/docker-compose.yml, and why:
+#
+#   - `migrate` still gates `ingest`/`api`/`label-preserve` via
+#     `service_completed_successfully`, `api` still carries the same
+#     Node-`fetch`-based `/healthz` healthcheck (no curl/wget in the
+#     node:20-bookworm-slim runtime image), `label-preserve` is still the
+#     same long-lived shell-loop backstop for the training-set preservation
+#     sweep (docs/architecture.md "Data lifecycle") — none of that is
+#     Coolify-specific, so none of it changed. ASSUMED: Coolify's "Docker
+#     Compose" resource type runs something equivalent to `docker compose
+#     up -d` under the hood, so standard Compose features (`depends_on`
+#     conditions, healthchecks, `deploy.resources.limits` applied outside
+#     Swarm — see ops/docker-compose.yml's own header comment for why that
+#     last one works at all) behave the same. This has not been
+#     independently verified against a live Coolify deployment; if your
+#     version orchestrates compose services differently (e.g. restarting
+#     one-shot jobs, or not honoring `service_completed_successfully`),
+#     confirm `migrate` actually blocks the others before relying on it.
+#   - `build: {context: .., dockerfile: Dockerfile}` on every service that
+#     builds an image, exactly like ops/docker-compose.yml. Standard Docker
+#     Compose resolves a `context:` path relative to the compose file's own
+#     directory (`ops/`), not to whatever a PaaS's "Base Directory" setting
+#     happens to be — so `context: ..` lands at the repo root the same way
+#     it does for the vanilla path, regardless of Coolify's Base Directory
+#     value above. That Base Directory setting is (ASSUMED) about where
+#     Coolify looks for *this file*, not a re-basing of paths written inside
+#     it.
+#   - The UDP ingest port is still published straight through
+#     (`ports: - "...:.../udp"` on `ingest`) — Coolify's HTTP reverse proxy
+#     has no way to front a raw UDP listener, so this needs its own real
+#     port mapping same as the vanilla path, independent of whatever domain
+#     routing Coolify does for `api`.
+#   - `timescaledb` is still never published to the host.
+
+x-app-env: &app-env
+  NODE_ENV: production
+  # Same names as ops/docker-compose.yml's `x-app-env` anchor, checked by
+  # the same drift test (server/packages/config/src/opsEnvDrift.test.ts,
+  # extended to also scan this file) against
+  # server/packages/config/src/env.ts's `ENV_VAR_PATHS` — so this comment
+  # cannot silently drift out of sync with the code either.
+  #
+  # Set these as Environment Variables on the Coolify resource (its own
+  # UI/API, not a `.env` file checked into this repo) — see
+  # ops/.env.example for what each one means and how to generate secrets;
+  # that file's per-variable comments apply here unchanged even though
+  # Coolify never reads the file itself.
+  HOMECSI_CONFIG_PATH: /etc/homecsi/config.yaml
+  HOMECSI_SERVER_UDP_PORT: ${HOMECSI_UDP_PORT:-5566}
+  HOMECSI_SERVER_HTTP_PORT: "8080"
+  HOMECSI_SERVER_API_TOKEN: ${HOMECSI_SERVER_API_TOKEN}
+  HOMECSI_DATABASE_HOST: timescaledb
+  HOMECSI_DATABASE_PORT: "5432"
+  HOMECSI_DATABASE_NAME: ${POSTGRES_DB}
+  HOMECSI_DATABASE_USER: ${POSTGRES_USER}
+  HOMECSI_DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+  HOMECSI_LOGGING_LEVEL: ${HOMECSI_LOGGING_LEVEL:-info}
+  # Optional. Not required: `/data/firmware` (the built-in default this
+  # resolves to if unset — see server/packages/config/src/schema.ts and
+  # docs/device-api.md) already lives inside the `homecsi_data` volume
+  # mounted below on `ingest`/`api`/`label-preserve`. Only set this if you
+  # want the OTA artifact directory somewhere other than the default.
+  HOMECSI_OTA_FIRMWARE_DIR: ${HOMECSI_OTA_FIRMWARE_DIR:-/data/firmware}
+
+x-logging: &default-logging
+  # Same rationale as ops/docker-compose.yml's identical anchor: bounds the
+  # `json-file` log driver so a chatty/crash-looping container cannot fill
+  # disk via its own captured stdout/stderr.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command:
+      # Same conservative small-VPS tuning as ops/docker-compose.yml's
+      # `timescaledb` service — see that file's comments for the full
+      # per-flag rationale; not repeated here to avoid two copies drifting.
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - synchronous_commit=off
+      - -c
+      - random_page_cost=1.1
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Intentionally NOT published — reachable only on the internal
+    # `homecsi` compose network, same posture as ops/docker-compose.yml.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    # Bare subcommand only — see this file's header and the root Dockerfile
+    # for why prefixing the interpreter would break commander's argv.
+    command: ["migrate"]
+    environment: *app-env
+    # config.yaml arrives via a Coolify file-mount storage entry targeting
+    # /etc/homecsi/config.yaml, configured in the Coolify UI — see this
+    # file's header. No `volumes:` line for it here.
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  ingest:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    command: ["ingest"] # subcommand only - see the migrate service above
+    restart: unless-stopped
+    environment: *app-env
+    ports:
+      # UDP ingest does not go through Coolify's HTTP reverse proxy - it
+      # needs its own published port mapping, world-reachable exactly like
+      # the vanilla path (every datagram is AEAD-authenticated per
+      # docs/protocol.md; see ops/docker-compose.yml's identical comment).
+      - "${HOMECSI_UDP_PORT:-5566}:${HOMECSI_UDP_PORT:-5566}/udp"
+    volumes:
+      - homecsi_data:/data
+      # config.yaml: see the `migrate` service's comment above.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # No healthcheck: ingest is UDP-only with no request/response surface
+    # to honestly probe - see ops/docker-compose.yml's identical comment
+    # for the full reasoning; `restart: unless-stopped` covers the crash
+    # case.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    command: ["serve"] # subcommand only - see the migrate service above
+    restart: unless-stopped
+    environment: *app-env
+    volumes:
+      - homecsi_data:/data
+      # config.yaml: see the `migrate` service's comment above.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Identical to ops/docker-compose.yml's `api` healthcheck - see that
+      # file's comment for why Node's built-in `fetch` and not curl/wget.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    # No `ports:` here on purpose, same as ops/docker-compose.yml - the
+    # debug API/UI is reached through a reverse proxy on the container
+    # network, not published directly. Under Coolify that proxy is
+    # Coolify's own, not Caddy; Coolify connects to this container over the
+    # `homecsi` network using the port set in its "Ports Exposes" field
+    # (see this file's header) rather than a host-published port.
+    networks:
+      - homecsi
+    logging: *default-logging
+
+  # Backstop for the training-set preservation sweep - see this file's
+  # header and docs/deployment.md "Scheduling the training-set preservation
+  # sweep" for why this cannot just be dropped. Identical to
+  # ops/docker-compose.yml's `label-preserve` service.
+  label-preserve:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    # Replaces the image's ENTRYPOINT entirely (compose `entrypoint:`
+    # replaces, unlike `command:` which appends) so this service can run a
+    # scheduling loop instead of a single CLI invocation - see
+    # ops/docker-compose.yml's identical service for the full rationale.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          echo "[label-preserve] running at $$(date -u +%FT%TZ)";
+          if node packages/cli/dist/index.js label preserve; then
+            echo "[label-preserve] ok at $$(date -u +%FT%TZ)";
+          else
+            echo "[label-preserve] FAILED (exit $$?) at $$(date -u +%FT%TZ)" >&2;
+          fi
+          sleep 86400;
+        done
+    restart: unless-stopped
+    environment: *app-env
+    # config.yaml: see the `migrate` service's comment above. No other
+    # volumes needed - `label preserve` only talks to the database.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - homecsi
+    logging: *default-logging
+
+networks:
+  homecsi:
+    driver: bridge
+
+volumes:
+  timescaledb_data:
+  # Application data (captures, logs, OTA firmware artifacts - see this
+  # file's header for why this is a named volume here instead of
+  # ops/docker-compose.yml's `${HOMECSI_DATA_DIR}` host bind mount).
+  homecsi_data:

@@ -1,28 +1,67 @@
 # Home CSI node partition table.
 #
-# FLASH SIZE ASSUMPTION -- READ THIS BEFORE FLASHING
-# ---------------------------------------------------
+# ############################################################################
+# #  THIS TABLE REQUIRES A 4 MB FLASH PART. RUN `esptool.py flash_id` AND    #
+# #  CONFIRM 4 MB *BEFORE* FLASHING IT TO ANY BOARD.                         #
+# ############################################################################
+#
 # The flash size of the Makeblock Halocode module has NOT been verified by
-# this project. Run `esptool.py flash_id` (see firmware/bringup/README.md)
-# and record the real value in the bring-up table before trusting anything
-# here.
+# this project (see firmware/bringup/README.md and the "what is not verified"
+# table in firmware/README.md). Up to and including v0.1.0 this file was sized
+# for 2 MB, the smallest flash any plausible ESP32 module ships with, and
+# carried a single `factory` app partition because there was no OTA.
 #
-# This table is deliberately sized to fit in **2 MB**, the smallest flash
-# any plausible ESP32 module ships with, so it works on a 2 MB part and is
-# simply under-using a 4 MB one. Nothing else in the firmware assumes a
-# flash size.
+# OTA changes that, and it is a HARDWARE PREREQUISITE rather than a detail: an
+# A/B layout needs two full copies of the application plus an otadata
+# partition, which does not fit in 2 MB at any sane app size. A 2 MB part
+# flashed with this table will fail to boot, and you want to discover that on
+# a bench with a USB cable attached, not after the node is screwed to a wall.
 #
-#   0x000000-0x008000  bootloader + partition table (implicit)
-#   0x009000  nvs       24 KB   per-node identity, PSK, settings, boot epoch
-#   0x00f000  phy_init   4 KB   RF calibration data
-#   0x010000  factory  1536 KB  the application
-#   ----------------------------------------- total 0x190000 = 1.5625 MB
+#   esptool.py --port <PORT> flash_id     # look for "Detected flash size"
 #
-# There is no OTA partition in v1 (no OTA in v1; see docs/roadmap.md). To add
-# OTA later on a confirmed 4 MB part, replace `factory` with ota_0/ota_1 plus
-# an `otadata` partition -- that is the only change needed here.
+# LAYOUT (4 MB = 0x400000)
+#
+#   0x000000  bootloader           32 KB   implicit
+#   0x008000  partition table       4 KB   implicit
+#   0x009000  nvs                  24 KB   per-node identity, PSK, api_base,
+#                                          settings, boot epoch   (0x6000)
+#   0x00f000  phy_init              4 KB   RF calibration data    (0x1000)
+#   0x010000  otadata               8 KB   which slot boots, and each slot's
+#                                          valid/invalid/pending state
+#                                          (0x2000; must be exactly 2 sectors)
+#   0x012000  -- 56 KB unused --           see the note below
+#   0x020000  ota_0              1920 KB   application slot A   (0x1E0000)
+#   0x200000  ota_1              1920 KB   application slot B   (0x1E0000)
+#   0x3E0000  -- 128 KB unused --          headroom
+#   -------------------------------------------------------------------------
+#   0x020000 + 0x1E0000 = 0x200000   (ota_0 ends exactly where ota_1 starts)
+#   0x200000 + 0x1E0000 = 0x3E0000   total used, of 0x400000 = 3.875 of 4 MB
+#
+# WHY THE 56 KB GAP AT 0x012000. App partitions on the ESP32 must start on a
+# 64 kB boundary, so ota_0 cannot begin before 0x020000. The alternative -
+# ESP-IDF's own partitions_two_ota.csv - closes the gap by shrinking nvs to
+# 16 KB and slotting otadata in below 0x010000. That would MOVE nothing but
+# would resize the nvs partition, and every already-provisioned board has a
+# 24 kB nvs image flashed at 0x9000 (tools/provision.py NVS_OFFSET/NVS_SIZE);
+# shrinking it would have the tail of that image land on top of otadata. Fifty
+# six kilobytes of a 4 MB part is a cheap price for nvs staying exactly where
+# and exactly as big as it already is on hardware.
+#
+# 1920 KB per slot is far more than this firmware needs (it is a few hundred
+# kilobytes), so the slack is deliberate: it is what lets the app grow without
+# another partition-table change, and a partition-table change is the one kind
+# of change that cannot be delivered over the air.
+#
+# NOTE: there is no `factory` partition. With ota_0/ota_1 present and no
+# factory app, the bootloader boots whichever slot otadata selects, and
+# `idf.py flash` writes to ota_0. That is intentional: a factory partition
+# would cost a third copy of the app for a recovery path that a board on a
+# wall cannot use anyway (you would have to reach it with a USB cable, at
+# which point you can just reflash it).
 #
 # Name,     Type, SubType, Offset,   Size,     Flags
 nvs,        data, nvs,     0x9000,   0x6000,
 phy_init,   data, phy,     0xf000,   0x1000,
-factory,    app,  factory, 0x10000,  0x180000,
+otadata,    data, ota,     0x10000,  0x2000,
+ota_0,      app,  ota_0,   0x20000,  0x1E0000,
+ota_1,      app,  ota_1,   0x200000, 0x1E0000,

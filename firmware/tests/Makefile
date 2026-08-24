@@ -26,9 +26,11 @@ SHARED   = $(PROTO)/csi_codec.c \
            $(PROTO)/csi_ring.c \
            $(PROTO)/csi_batcher.c \
            $(PROTO)/bw_budget.c \
-           $(PROTO)/seq_epoch.c
+           $(PROTO)/seq_epoch.c \
+           $(PROTO)/device_token.c
 
-SUPPORT  = support/ref_chacha20poly1305.c
+SUPPORT  = support/ref_chacha20poly1305.c \
+           support/ref_hmac_sha256.c
 
 TESTS    = $(wildcard test_*.c)
 BINS     = $(patsubst test_%.c,$(BUILD)/test_%,$(TESTS))

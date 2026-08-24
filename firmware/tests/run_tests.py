@@ -38,6 +38,7 @@ SHARED_SOURCES = [
     PROTO / "csi_batcher.c",
     PROTO / "bw_budget.c",
     PROTO / "seq_epoch.c",
+    PROTO / "device_token.c",
 ]
 
 # Host-only helpers (reference crypto, doc parsing). Never built into firmware.

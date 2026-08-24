@@ -21,6 +21,7 @@ static const char *TAG = "node_cfg";
 #define K_AP_PASS     "ap_pass"
 #define K_CHANNEL     "channel"
 #define K_SNTP        "sntp_srv"
+#define K_API_BASE    "api_base"
 #define K_SND_MS      "snd_ms"
 #define K_SND_JIT     "snd_jit"
 #define K_RSSI_FLOOR  "rssi_floor"
@@ -258,6 +259,14 @@ esp_err_t node_config_load(node_config_t *cfg)
     }
     (void)get_str(h, K_SNTP, cfg->sntp_server, sizeof(cfg->sntp_server));
 
+    /* An absent api_base is NOT an error: it means OTA auto-update is off.
+     * Every board provisioned before OTA existed lacks this key and must keep
+     * capturing and uplinking exactly as before, so it is deliberately not
+     * part of node_config_is_deployable(). See ota_start(). */
+    if (get_str(h, K_API_BASE, cfg->api_base, sizeof(cfg->api_base))) {
+        cfg->src_api_base = CFG_SRC_NVS;
+    }
+
     (void)get_u32(h, K_SND_MS, &cfg->sounding_interval_ms);
     (void)get_u8(h, K_SND_JIT, &cfg->sounding_jitter_pct);
     (void)get_i8(h, K_RSSI_FLOOR, &cfg->rssi_floor_dbm);
@@ -370,6 +379,16 @@ void node_config_log(const node_config_t *cfg)
     ESP_LOGI(TAG, "  channel        = %u        [%s]", (unsigned)cfg->channel,
              src_name(cfg->src_channel));
     ESP_LOGI(TAG, "  sntp           = %s", cfg->sntp_server);
+    if (cfg->api_base[0] != '\0') {
+        ESP_LOGI(TAG, "  api_base       = %s    [%s]", cfg->api_base,
+                 src_name(cfg->src_api_base));
+    } else {
+        /* Info, not warning: a node without OTA is a completely functional
+         * node, and this line must not read like a fault. */
+        ESP_LOGI(TAG, "  api_base       = (unset) - OTA auto-update off, "
+                      "capture and uplink unaffected  [%s]",
+                 src_name(cfg->src_api_base));
+    }
     ESP_LOGI(TAG, "  sounding       = every %u ms +/- %u%%",
              (unsigned)cfg->sounding_interval_ms,
              (unsigned)cfg->sounding_jitter_pct);

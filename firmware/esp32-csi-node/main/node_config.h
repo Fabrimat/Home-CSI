@@ -3,10 +3,10 @@
  *
  * RULE: nothing that differs between nodes, and nothing secret, is ever
  * compiled into the image. node_id, the 32-byte PSK, the server address, the
- * Wi-Fi credentials and the MAC allowlist all come from NVS, written at
- * provisioning time by tools/provision.py. The Kconfig values are a bench
- * fallback only, and every field records which source won so the boot log
- * makes it obvious.
+ * device-API base URL, the Wi-Fi credentials and the MAC allowlist all come
+ * from NVS, written at provisioning time by tools/provision.py. The Kconfig
+ * values are a bench fallback only, and every field records which source won
+ * so the boot log makes it obvious.
  */
 #ifndef HCS_NODE_CONFIG_H
 #define HCS_NODE_CONFIG_H
@@ -24,6 +24,8 @@
 #define NODE_CFG_HOST_MAX 64
 #define NODE_CFG_SSID_MAX 33
 #define NODE_CFG_PASS_MAX 65
+/* An https:// URL is longer than a bare hostname, so it gets its own bound. */
+#define NODE_CFG_URL_MAX 128
 
 typedef enum {
     CFG_SRC_MISSING = 0, /* neither NVS nor Kconfig supplied a value */
@@ -44,6 +46,19 @@ typedef struct {
     char ap_password[NODE_CFG_PASS_MAX];
     uint8_t channel; /* pinned 2.4 GHz channel, must match the AP */
     char sntp_server[NODE_CFG_HOST_MAX];
+
+    /* HTTPS base URL of the device API (OTA manifest/firmware and the hello
+     * telemetry ping), e.g. "https://homecsi.example.com". This is a
+     * DIFFERENT thing from server_host/server_port above, which is the UDP
+     * CSI ingest target: one is a TLS web endpoint, the other a raw UDP
+     * socket, and in a real deployment they are usually different ports and
+     * may be different hosts.
+     *
+     * Empty is legal and means "OTA disabled". Boards provisioned before OTA
+     * existed have no such NVS key, and they must keep capturing exactly as
+     * before, so this is deliberately NOT part of
+     * node_config_is_deployable(). */
+    char api_base[NODE_CFG_URL_MAX];
 
     /* --- capture --- */
     uint32_t sounding_interval_ms;
@@ -70,6 +85,7 @@ typedef struct {
     cfg_source_t src_node_id;
     cfg_source_t src_psk;
     cfg_source_t src_server;
+    cfg_source_t src_api_base;
     cfg_source_t src_wifi;
     cfg_source_t src_channel;
     cfg_source_t src_allowlist;
