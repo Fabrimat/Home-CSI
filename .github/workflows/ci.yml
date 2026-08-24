@@ -96,7 +96,12 @@ jobs:
         # if the script is not executable, or has CRLF endings (a CRLF shebang
         # makes the kernel hunt for an interpreter named "/bin/sh\r" and report
         # "no such file or directory" about a path that plainly exists).
-        run: docker run --rm homecsi-ci --help | grep -q 'run the UDP ingest server'
+        run: |
+          docker run --rm homecsi-ci --help | grep -q 'run the UDP ingest server'
+          # curl is not a convenience here - Coolify's healthcheck shells out to
+          # it inside the container, and without it every deployment rolls back
+          # while the application itself is healthy. See the Dockerfile.
+          docker run --rm --entrypoint curl homecsi-ci --version
 
       - name: Validate docker-compose.yml
         run: docker compose -f ops/docker-compose.yml config

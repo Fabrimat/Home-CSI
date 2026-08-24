@@ -315,6 +315,28 @@ Create a Coolify **Application** resource pointed at this repository:
   Matches `HOMECSI_SERVER_HTTP_PORT` and the `/healthz` healthcheck
   (`server/packages/api/src/routes/health.ts`) — that specific value is a
   fact about this repo, not about Coolify.
+- **Healthcheck: leave Coolify's defaults (path `/healthz`, port from Ports
+  Exposes).** But know how it works, because its failure mode is badly
+  misleading: Coolify runs the healthcheck as a shell command *inside* the
+  container, shelling out to `curl` or `wget`. `node:20-bookworm-slim` ships
+  neither, so on a stock Node image every deployment ends in
+
+  ```
+  Healthcheck logs: /bin/sh: 1: curl: not found
+                    /bin/sh: 1: wget: not found | Return code: 1
+  New container is not healthy, rolling back to the old container.
+  ```
+
+  with the application up and serving the entire time. From the outside it is
+  indistinguishable from a crash-loop. This repo's `Dockerfile` therefore
+  installs `curl` in the runtime stage for this one consumer, and CI asserts
+  it is still there. Coolify does warn about it — several lines above the
+  error it causes.
+
+  Set **Start Period** to at least `90` seconds. The default 5 s plus 10
+  retries at 5 s gives the container 55 s to answer, and
+  `docker-entrypoint.sh` may legitimately spend up to 60 s retrying
+  migrations against a database that is still starting.
 - **Start Command: there is no such field, and you do not need one.**
   **VERIFIED** the hard way: `PATCH /api/v1/applications/{uuid}` with
   `custom_start_command` is rejected outright by Coolify 4.3.10 —

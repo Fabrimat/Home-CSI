@@ -84,6 +84,26 @@ WORKDIR /app
 # UID/GID for the `chmod 600`/`chown` step. 10001 is arbitrary but fixed;
 # picked comfortably above typical host-system UID ranges to avoid
 # colliding with a real host account.
+# curl exists in this image for exactly one consumer: Coolify's healthcheck.
+# A Coolify Application on the dockerfile build pack runs its configured
+# healthcheck as a command INSIDE the container ("Healthcheck URL (inside the
+# container): GET: http://localhost:8080/healthz"), shelling out to curl or
+# wget - and node:20-bookworm-slim ships neither. VERIFIED from a real deploy
+# log, which is worth quoting because the failure does not look like this:
+#
+#   Healthcheck logs: /bin/sh: 1: curl: not found
+#                     /bin/sh: 1: wget: not found | Return code: 1
+#   New container is not healthy, rolling back to the old container.
+#
+# The application itself was up and serving the whole time. Coolify simply
+# could not ask, so it rolled the deployment back - which reads exactly like
+# an application crash-loop from the outside. Coolify does warn about this
+# ("the healthcheck needs a curl or wget command"), several lines above the
+# error it causes.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system --gid 10001 homecsi \
     && useradd --system --uid 10001 --gid homecsi --home-dir /app --shell /usr/sbin/nologin homecsi
 
