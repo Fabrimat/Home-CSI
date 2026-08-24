@@ -71,6 +71,13 @@ services:
       # api resource's Storage tab), no second copy of key material to drift.
       # The path embeds that Application's UUID; if `api` is ever recreated,
       # this path changes with it.
+      #
+      # ROTATION GOTCHA: this bind-mounts a FILE, so the container holds the
+      # inode it saw at start. Coolify rewrites that file on every `api`
+      # deploy rather than editing it in place, which replaces the inode - so
+      # after changing a node's PSK in the api resource's Storage tab, restart
+      # this service or it keeps authenticating against the old registry with
+      # no indication anything is stale.
       - '/data/coolify/applications/${HOMECSI_API_APP_UUID:?set to the api Application UUID}/etc/homecsi/config.yaml:/etc/homecsi/config.yaml:ro'
 
     # No healthcheck, deliberately. ingest is UDP-only with no request/response
