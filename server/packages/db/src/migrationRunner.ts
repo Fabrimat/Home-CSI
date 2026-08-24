@@ -3,7 +3,10 @@ import path from 'node:path';
 
 /** Minimal query surface this runner needs — satisfied by `pg.Pool`/`pg.Client` and by test fakes. */
 export interface DbExecutor {
-  query(sql: string, params?: readonly unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+  query(
+    sql: string,
+    params?: readonly unknown[],
+  ): Promise<{ rows: Array<Record<string, unknown>> }>;
 }
 
 export interface MigrationFile {
@@ -76,6 +79,27 @@ export interface RunMigrationsResult {
  * nothing new to apply returns `{ applied: [] }` without re-running
  * anything.
  */
+/**
+ * Renders a driver error with the context Postgres actually sent alongside
+ * the message. A migration file is executed as one multi-statement query, so
+ * the bare `message` does not say which statement failed - and TimescaleDB's
+ * refusals in particular are generic enough to fit several (`operation not
+ * supported on hypertables that have compression enabled` matched three
+ * different statements in migration 004 across three deploys). `detail`,
+ * `hint`, `where` and `position` are what narrow it down, and pg attaches
+ * them to the error object where a plain `${err.message}` throws them away.
+ */
+function describeDbError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const fields = err as Error & Record<string, unknown>;
+  const extras = (['detail', 'hint', 'where', 'position', 'code'] as const)
+    .map((key) =>
+      fields[key] === undefined || fields[key] === null ? null : `${key}=${String(fields[key])}`,
+    )
+    .filter((part): part is string => part !== null);
+  return extras.length > 0 ? `${err.message} (${extras.join(', ')})` : err.message;
+}
+
 export async function runMigrations(
   executor: DbExecutor,
   dir: string,
@@ -98,9 +122,7 @@ export async function runMigrations(
       ran.push(migration);
     } catch (err) {
       await executor.query('ROLLBACK');
-      throw new Error(
-        `migration ${migration.filename} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      throw new Error(`migration ${migration.filename} failed: ${describeDbError(err)}`);
     }
   }
   return { applied: ran };
