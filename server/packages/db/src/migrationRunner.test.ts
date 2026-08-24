@@ -123,14 +123,29 @@ describe('runMigrations (against a fake executor, no live DB)', () => {
 const REAL_DB_URL = process.env.HOMECSI_TEST_DATABASE_URL;
 
 describe.skipIf(!REAL_DB_URL)('runMigrations (real database, opt-in)', () => {
-  it('applies migrations 001 and 002 against a real TimescaleDB instance', async () => {
+  it('applies every migration in order against a real TimescaleDB instance', async () => {
     const { default: pg } = await import('pg');
     const client = new pg.Client({ connectionString: REAL_DB_URL });
     await client.connect();
     try {
       const migrationsDir = path.resolve(import.meta.dirname, '../migrations');
-      const result = await runMigrations(client, migrationsDir);
-      expect(result.applied.length).toBeGreaterThanOrEqual(0);
+      await runMigrations(client, migrationsDir);
+
+      // Assert the end state, not the return value. The previous assertion
+      // here (`applied.length` >= 0) was vacuously true, so this test could
+      // only ever fail by throwing -- and the whole point of pointing it at a
+      // real TimescaleDB is that some migrations are rejected only by the real
+      // engine. Migration 004 spent two production deploys discovering that a
+      // compression-enabled hypertable refuses both `ADD COLUMN ... NOT NULL`
+      // without a default and `ALTER COLUMN ... DROP DEFAULT`; this test had
+      // the reach to catch it and nobody had run it.
+      const applied = await client.query('SELECT id FROM schema_migrations');
+      const appliedIds = new Set(applied.rows.map((row: { id: number }) => Number(row.id)));
+      for (const migration of discoverMigrations(migrationsDir)) {
+        expect(appliedIds.has(migration.id), `migration ${migration.filename} not applied`).toBe(
+          true,
+        );
+      }
     } finally {
       await client.end();
     }
