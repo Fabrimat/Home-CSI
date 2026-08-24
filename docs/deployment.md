@@ -378,7 +378,16 @@ Create a Coolify **Application** resource pointed at this repository:
   plaintext. A read-only file mount at this exact path is the same end
   state as the vanilla path's `x-config-volume` bind mount, needing zero
   new server-side code.
-- **Pre-deployment command: leave it empty.** Migrations run themselves.
+- **Pre-deployment command: leave it EMPTY.** Migrations run themselves, and a
+  non-empty value here is actively harmful: Coolify runs it as
+  `docker exec <container> sh -c '<your command>'`, which bypasses the image's
+  ENTRYPOINT entirely. A bare subcommand therefore fails with
+  `sh: 1: migrate: not found` - and it fails *silently* until the application
+  first deploys successfully, because Coolify skips the step with "No running
+  containers found" while there is no container to exec into. An earlier
+  revision of this document told you to put `migrate` here; that was wrong. If
+  you ever do need a pre-deployment command, spell out the full argv
+  (`node packages/cli/dist/index.js migrate`).
   `docker-entrypoint.sh` runs `migrate` to completion before starting `serve`,
   but *only* on the no-arguments path — i.e. exactly the Coolify Application
   case, never the compose case, which keeps its own one-shot `migrate` service
@@ -429,37 +438,45 @@ actually created. Do not publish this resource's port to the Internet —
 the two Applications reach it over Coolify's internal Docker network, where
 the hostname is the database resource's UUID.
 
-### 3. Application: `ingest`
+### 3. `ingest` cannot be a Coolify Application at all
 
-A second Coolify Application, same repository, same Dockerfile, differing
-from `api` in exactly three settings:
+**VERIFIED, and it is a hard stop:** Coolify's `ports_mappings` field cannot
+express a UDP port. Its validation accepts `5566:5566` and rejects
+`5566:5566/udp` outright:
 
-- **`HOMECSI_COMMAND=ingest`.** This is the whole trick, and it is why the
-  image has no `CMD` — see the Start Command bullet in section 1.
-  Without it this Application would silently be a second copy of `serve`.
-- **Port mapping: `5566:5566/udp`.** Not "Ports Exposes" — a real published
-  host port, and the one setting that differs in kind from `api`. UDP ingest
-  does **not** go through Coolify's HTTP reverse proxy; that proxy only
-  understands HTTP(S). **Without an explicit UDP port mapping, every node
-  transmits into a void:** datagrams arrive at a port nothing is publishing,
-  ingest sees nothing, and there is no error on either side pointing at why.
-  Confirm the host's firewall (or cloud provider security group) allows
-  inbound UDP on this port too — Coolify's reverse proxy config has no
-  bearing on it.
-- **No domain, and healthcheck disabled.** `ingest` speaks no HTTP, so a
-  health check on it can only ever fail; see
-  `ops/docker-compose.coolify.yml`'s `ingest` service comment for why a fake
-  one would be worse than none.
+```
+PATCH /api/v1/applications/{uuid}  {"ports_mappings":"5566:5566/udp"}
+-> 422  {"ports_mappings":["The ports mappings field format is invalid."]}
+```
 
-Everything else is copied from `api`: same Build Pack, same Base Directory
-`/`, same `HOMECSI_DATABASE_*`, same `HOMECSI_CONFIG_PATH` and the same
-config file mount at `/etc/homecsi/config.yaml` — `ingest` needs the same
-node PSK registry to authenticate incoming datagrams.
+Coolify's HTTP reverse proxy is no help either - it only understands HTTP(S) -
+so an Application can publish TCP or nothing. `ingest` receives UDP datagrams
+(`docs/protocol.md`) and nothing else, which means an Application built from
+this repo can never receive a single sounding no matter how it is configured.
+The `HOMECSI_COMMAND=ingest` role selector in `docker-entrypoint.sh` works
+fine; the port does not.
 
-`ingest` deliberately does **not** auto-migrate (only the `serve` role does,
-so the two never race). On a first deploy, let the `api` Application come up
-healthy before deploying this one; on redeploys the order does not matter,
-since migrations are additive — see "Upgrades and rollback" below.
+So `ingest` has to run somewhere that can express a UDP publish:
+
+1. **A Coolify Docker Compose resource** - compose `ports:` supports `/udp`
+   normally. `ops/docker-compose.coolify.yml` already declares the service.
+   Keeps ingest inside Coolify's deploy-on-push model. Recommended.
+2. **A host-level unit** (systemd + `docker run --network coolify -p
+   5566:5566/udp ...`) reusing the image Coolify already built. Fewest
+   Coolify unknowns, but ingest then falls outside Coolify's management and
+   its image has to be updated by hand.
+
+Whichever it is: **without a UDP publish every node transmits into a void.**
+Datagrams arrive at a port nothing is listening on, ingest sees nothing, and
+there is no error on either side pointing at why. Confirm the host firewall
+allows inbound UDP on the port too - on the reference host that means a
+`DOCKER-USER` rule, see "Restricting the dashboard to a Tailscale tailnet"
+below for how that chain is used there.
+
+`ingest` also needs the same config file mount (`/etc/homecsi/config.yaml`)
+as `api`, for the node PSK registry it authenticates datagrams against, and
+it deliberately does **not** auto-migrate - only the `serve` role does, so the
+two never race.
 
 ### 4. `label-preserve` as a scheduled task, not a third Application
 
@@ -530,6 +547,80 @@ OTA firmware staged via one is invisible to the other. If you hit this
 limitation, the Docker Compose alternative at the end of this section (one
 resource, one named volume, multiple services) sidesteps it entirely by
 construction.
+
+### Restricting the dashboard to a Tailscale tailnet
+
+Goal: the dashboard and `/api/*` reachable only over a tailnet, while the UDP
+ingest port and the ESP32s' `/device/*` endpoints stay open to the Internet.
+The nodes cannot join a tailnet - they are ESP32s - so "all HTTP on the
+tailnet" would also disable over-the-air updates. What follows splits the two.
+
+**The finding that shapes everything else:** on a Coolify host the property
+"tailnet only" cannot come from Traefik. `coolify-proxy` binds `0.0.0.0:80`
+and `0.0.0.0:443`, so every hostname Traefik routes is reachable from the
+public IP by anyone who sends the right `Host` header - including a name that
+only resolves inside the tailnet. VERIFIED by adding a `*.ts.net` name as a
+second FQDN and then reaching it from off-tailnet over cleartext HTTP:
+
+```
+curl -H 'Host: host.example-tailnet.ts.net' http://<public-ip>/healthz   -> 200
+```
+
+That binding is also why `tailscale serve --https=443` does nothing useful
+here: traffic to the tailnet IP on :443 is answered by Traefik (with its
+default self-signed certificate), not by tailscaled.
+
+So the dashboard needs a port of its own that the kernel filters:
+
+1. **Publish the container's HTTP port on a dedicated host port.** Ports
+   Mappings `8082:8080`. Note Coolify cannot bind it to a single interface -
+   `127.0.0.1:8082:8080` is rejected (422, "The ports mappings field format is
+   invalid."), so it lands on `0.0.0.0` and step 2 is not optional.
+2. **Drop it on the public interface.** The reference host already uses this
+   idiom for Coolify's own port 8000, so follow it:
+
+   ```sh
+   sudo iptables -I DOCKER-USER -i ens160 -p tcp \
+     -m conntrack --ctorigdstport 8082 --ctdir ORIGINAL -j DROP
+   sudo netfilter-persistent save
+   ```
+
+   `--ctorigdstport` is load-bearing: DNAT runs before the filter table, so by
+   the time a packet reaches `DOCKER-USER` its destination port is the
+   *container's* (8080), not the published one. Matching `--dport 8082` there
+   silently never fires; matching `--dport 8080` would also kill Traefik's own
+   traffic to the container and break `/device/*`.
+3. **Terminate TLS with Tailscale, on a port Traefik does not hold.**
+
+   ```sh
+   sudo tailscale serve --bg --https=8443 http://127.0.0.1:8082
+   ```
+
+   Tailscale supplies the certificate; there is nothing to renew. Not
+   `tailscale funnel` - that publishes to the Internet, the opposite of this.
+4. **Scope the public route to the devices.** Set the Application's FQDN to
+   `https://csi.larosa.work/device` and turn Strip Prefix off
+   (`{"is_stripprefix_enabled":false}`), or `/device/hello` arrives at the
+   server as `/hello`. Coolify then generates exactly one rule pair:
+
+   ```
+   rule=Host(`csi.larosa.work`) && PathPrefix(`/device`)
+   middlewares=gzip          # no stripprefix
+   ```
+
+Verified end state:
+
+| request | public `csi.larosa.work` | tailnet `:8443` |
+| --- | --- | --- |
+| `/` (dashboard) | 503 | 200 |
+| `/api/nodes` | 503 | 401 |
+| `/device/hello` | 401 | 401 |
+| `/device/ota/manifest` | 401 | 401 |
+| host port 8082 | connection times out | n/a |
+
+The 503s are Coolify's own catch-all (`/data/coolify/proxy/dynamic/`
+`default_redirect_503.yaml`) for requests matching no router - not a stale
+route, and not the application answering.
 
 ### 7. Publishing firmware images
 
