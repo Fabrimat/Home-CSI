@@ -31,15 +31,44 @@
 -- re-decoding the same wire bytes always reproduces the same `time`
 -- value and therefore the same key.
 --
--- Columns are added NOT NULL with no default: safe only because this is
--- a pre-launch, greenfield project (docs/architecture.md "Status") with
--- no rows in these hypertables yet in any real deployment. If either
--- table ever holds rows before a migration like this runs, it would need
--- a backfill step first (out of scope here).
+-- Why every column below is added WITH a default and then immediately has it
+-- dropped, instead of being declared plainly NOT NULL:
+--
+--   Migration 003 enables TimescaleDB compression on csi_records and
+--   heartbeats, and TimescaleDB refuses `ADD COLUMN ... NOT NULL` with no
+--   default on a compression-enabled hypertable:
+--
+--     cannot add column with NOT NULL constraint without default
+--     to a hypertable that has compression enabled
+--
+--   (It cannot fill the column in chunks that are already compressed. That
+--   there are no such chunks yet does not matter — the check is on the
+--   table's compression setting, not on its contents.) Adding the column
+--   with a default and then dropping the default is TimescaleDB's own
+--   documented workaround, and both steps are catalog-only here.
+--
+--   The default is dropped rather than kept because these are dedup-key
+--   columns: leaving `DEFAULT 0` on seq/boot_epoch/record_index would let an
+--   INSERT that forgot one of them silently write a wrong-but-valid identity
+--   tuple instead of failing loudly. The default exists only for the width
+--   of the ALTER.
+--
+--   This applies to any future migration adding a NOT NULL column to
+--   csi_records or heartbeats (003), ingest_metrics_snapshots (005), or
+--   features (007) — every compressed hypertable in this schema.
+--
+-- The end state is still NOT NULL with no default. That is safe only
+-- because this is a pre-launch, greenfield project (docs/architecture.md
+-- "Status") with no rows in these hypertables yet in any real deployment.
+-- If either table ever holds rows before a migration like this runs, it
+-- would need a backfill step first (out of scope here).
 
-ALTER TABLE csi_records ADD COLUMN boot_epoch integer NOT NULL;
-ALTER TABLE csi_records ADD COLUMN seq integer NOT NULL;
-ALTER TABLE csi_records ADD COLUMN record_index smallint NOT NULL;
+ALTER TABLE csi_records ADD COLUMN boot_epoch integer NOT NULL DEFAULT 0;
+ALTER TABLE csi_records ALTER COLUMN boot_epoch DROP DEFAULT;
+ALTER TABLE csi_records ADD COLUMN seq integer NOT NULL DEFAULT 0;
+ALTER TABLE csi_records ALTER COLUMN seq DROP DEFAULT;
+ALTER TABLE csi_records ADD COLUMN record_index smallint NOT NULL DEFAULT 0;
+ALTER TABLE csi_records ALTER COLUMN record_index DROP DEFAULT;
 
 -- sig_mode (docs/protocol.md section 9.2: 0 = non-HT/802.11b/g, 1 =
 -- HT/802.11n) was omitted from migration 002. B4's feature extraction
@@ -47,13 +76,16 @@ ALTER TABLE csi_records ADD COLUMN record_index smallint NOT NULL;
 -- correctly — flagged in the B3 report and added here since it is a
 -- cheap, additive column change on the same table this migration is
 -- already altering.
-ALTER TABLE csi_records ADD COLUMN sig_mode smallint NOT NULL;
+ALTER TABLE csi_records ADD COLUMN sig_mode smallint NOT NULL DEFAULT 0;
+ALTER TABLE csi_records ALTER COLUMN sig_mode DROP DEFAULT;
 
 CREATE UNIQUE INDEX idx_csi_records_datagram_identity
   ON csi_records (node_id, boot_epoch, seq, record_index, time);
 
-ALTER TABLE heartbeats ADD COLUMN boot_epoch integer NOT NULL;
-ALTER TABLE heartbeats ADD COLUMN seq integer NOT NULL;
+ALTER TABLE heartbeats ADD COLUMN boot_epoch integer NOT NULL DEFAULT 0;
+ALTER TABLE heartbeats ALTER COLUMN boot_epoch DROP DEFAULT;
+ALTER TABLE heartbeats ADD COLUMN seq integer NOT NULL DEFAULT 0;
+ALTER TABLE heartbeats ALTER COLUMN seq DROP DEFAULT;
 
 CREATE UNIQUE INDEX idx_heartbeats_datagram_identity
   ON heartbeats (node_id, boot_epoch, seq, time);
