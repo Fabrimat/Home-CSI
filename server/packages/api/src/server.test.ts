@@ -29,6 +29,37 @@ function percentEncodeApiPrefix(url: string): string {
   return `/%61pi${url.slice('/api'.length)}`;
 }
 
+describe('logger wiring', () => {
+  // Every other test in this file omits `logger`, taking buildApp's boolean
+  // branch. startServer does not: it passes a live pino instance, and Fastify 5
+  // rejects an instance supplied as `logger` rather than `loggerInstance` with
+  // FST_ERR_LOG_INVALID_LOGGER_CONFIG. That threw at construction time in
+  // production only, and cost five failed deployments to find, so the
+  // production shape is now covered here.
+  it('accepts a ready-made logger instance, the way startServer passes one', async () => {
+    const { pino } = await import('pino');
+    const app = buildApp({
+      db: new FakeHomeCsiDb(),
+      apiToken: API_TOKEN,
+      webAssetsDir: NONEXISTENT_ASSETS_DIR,
+      logger: pino({ level: 'silent' }),
+    });
+    const res = await app.inject({ method: 'GET', url: '/healthz' });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('still accepts the boolean form', async () => {
+    const app = buildApp({
+      db: new FakeHomeCsiDb(),
+      apiToken: API_TOKEN,
+      webAssetsDir: NONEXISTENT_ASSETS_DIR,
+      logger: false,
+    });
+    const res = await app.inject({ method: 'GET', url: '/healthz' });
+    expect(res.statusCode).toBe(200);
+  });
+});
+
 describe('health route (unauthenticated)', () => {
   it('responds 200 without any token when the db is healthy', async () => {
     const { app } = makeApp();
@@ -74,7 +105,11 @@ describe('bearer auth on every /api/* route', () => {
 
     it(`rejects ${route.method} ${route.url} with a token of a different length than expected`, async () => {
       const { app } = makeApp();
-      const res = await app.inject({ method: route.method, url: route.url, headers: authHeader('short') });
+      const res = await app.inject({
+        method: route.method,
+        url: route.url,
+        headers: authHeader('short'),
+      });
       expect(res.statusCode).toBe(401);
     });
 
@@ -96,7 +131,10 @@ describe('bearer auth on every /api/* route', () => {
 
     it(`rejects ${route.method} ${percentEncodeApiPrefix(route.url)} (percent-encoded prefix) with no Authorization header`, async () => {
       const { app } = makeApp();
-      const res = await app.inject({ method: route.method, url: percentEncodeApiPrefix(route.url) });
+      const res = await app.inject({
+        method: route.method,
+        url: percentEncodeApiPrefix(route.url),
+      });
       expect(res.statusCode).toBe(401);
     });
   }
@@ -404,7 +442,12 @@ describe('occupancy is a sparse event log, read with step semantics', () => {
 describe('label session lifecycle', () => {
   it('starts a session, annotates it, and stops it', async () => {
     const { app } = makeApp();
-    const start = await app.inject({ method: 'POST', url: '/api/labels/sessions', headers: authHeader(), payload: { notes: 'test' } });
+    const start = await app.inject({
+      method: 'POST',
+      url: '/api/labels/sessions',
+      headers: authHeader(),
+      payload: { notes: 'test' },
+    });
     expect(start.statusCode).toBe(201);
     const sessionId = (start.json() as { session: { id: number } }).session.id;
 
@@ -416,14 +459,22 @@ describe('label session lifecycle', () => {
     });
     expect(label.statusCode).toBe(201);
 
-    const stop = await app.inject({ method: 'POST', url: `/api/labels/sessions/${sessionId}/stop`, headers: authHeader() });
+    const stop = await app.inject({
+      method: 'POST',
+      url: `/api/labels/sessions/${sessionId}/stop`,
+      headers: authHeader(),
+    });
     expect(stop.statusCode).toBe(200);
     expect((stop.json() as { session: { endedAt: string | null } }).session.endedAt).not.toBeNull();
   });
 
   it('404s stopping a session that does not exist', async () => {
     const { app } = makeApp();
-    const res = await app.inject({ method: 'POST', url: '/api/labels/sessions/999/stop', headers: authHeader() });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/labels/sessions/999/stop',
+      headers: authHeader(),
+    });
     expect(res.statusCode).toBe(404);
   });
 });

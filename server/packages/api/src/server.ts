@@ -8,8 +8,16 @@ import { DeviceTokenRegistry } from './deviceAuth.js';
 import type { HomeCsiDb } from './db/types.js';
 import { LiveHub } from './live/hub.js';
 import { registerCsiRoutes } from './routes/csi.js';
-import { DEFAULT_RETENTION_MAX_AGE_MS, registerConfigRoutes, type ClientConfig } from './routes/config.js';
-import { DEFAULT_OTA_FIRMWARE_DIR, DeviceHelloStore, registerDeviceRoutes } from './routes/device.js';
+import {
+  DEFAULT_RETENTION_MAX_AGE_MS,
+  registerConfigRoutes,
+  type ClientConfig,
+} from './routes/config.js';
+import {
+  DEFAULT_OTA_FIRMWARE_DIR,
+  DeviceHelloStore,
+  registerDeviceRoutes,
+} from './routes/device.js';
 import { registerFeatureRoutes } from './routes/features.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerLabelRoutes, type LabelPreservationDeps } from './routes/labels.js';
@@ -75,7 +83,22 @@ export interface BuildAppOptions {
  * `HomeCsiDb` fake and no live database or open socket.
  */
 export function buildApp(options: BuildAppOptions): FastifyInstance {
-  const app = Fastify({ logger: options.logger ?? false });
+  // Fastify 5 split what Fastify 4 accepted under a single `logger` option: a
+  // configuration OBJECT still goes to `logger`, but a ready-made logger
+  // instance must be handed over as `loggerInstance`. Passing an instance as
+  // `logger` throws FST_ERR_LOG_INVALID_LOGGER_CONFIG ("logger options only
+  // accepts a configuration object") at construction time.
+  //
+  // This mattered only in production, which is why it shipped: startServer
+  // (index.ts) is the one caller that passes a real pino instance
+  // (logs/logger.ts), while every test here passes `false` or omits the
+  // option entirely and takes the boolean branch. It cost five failed Coolify
+  // deployments, because a container that dies at startup is indistinguishable
+  // from every other reason a deployment can roll back.
+  const app: FastifyInstance =
+    options.logger && typeof options.logger === 'object'
+      ? Fastify({ loggerInstance: options.logger })
+      : Fastify({ logger: options.logger ?? false });
 
   // --- auth: every /api/* route except the WebSocket upgrade itself, which
   // authenticates via its own first-message protocol because browsers
