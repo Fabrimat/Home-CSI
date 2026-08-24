@@ -106,6 +106,21 @@ jobs:
       - name: Validate docker-compose.yml
         run: docker compose -f ops/docker-compose.yml config
 
+      - name: Validate docker-compose.ingest.yml
+        # The ingest-only compose file (docs/deployment.md section 3): the
+        # deployment path where `api` is a Coolify Application and ingest
+        # cannot be, because an Application's ports_mappings field rejects
+        # UDP. Validated for the same reason as the other two - and the dummy
+        # values below exist because the file deliberately uses `:?` on every
+        # secret, so a missing one fails loudly at deploy time rather than
+        # starting ingest with an empty password.
+        env:
+          HOMECSI_DATABASE_HOST: db-uuid-placeholder
+          HOMECSI_DATABASE_PASSWORD: placeholder
+          HOMECSI_SERVER_API_TOKEN: placeholder-token-long-enough
+          HOMECSI_API_APP_UUID: api-app-uuid-placeholder
+        run: docker compose -f ops/docker-compose.ingest.yml config
+
       - name: Validate docker-compose.coolify.yml
         # The Coolify deployment path's compose file (docs/deployment.md).
         # Validated here for the same reason as the one above: this repo has a

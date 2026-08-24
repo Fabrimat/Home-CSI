@@ -1,0 +1,90 @@
+# Home CSI — the `ingest` role as a standalone Coolify "Docker Compose"
+# resource, alongside the `api` Application and the TimescaleDB database.
+#
+# WHY THIS FILE EXISTS SEPARATELY from ops/docker-compose.coolify.yml (which
+# also defines an `ingest` service): that file describes the whole stack as
+# ONE compose resource — its own Postgres, its own migrate gate, api,
+# label-preserve. This deployment took the other documented path: `api` is a
+# Coolify Application and the database is a Coolify PostgreSQL resource, both
+# already running. Pointing Coolify at the full stack file would stand up a
+# second Postgres next to the real one.
+#
+# WHY `ingest` CANNOT JUST BE A SECOND APPLICATION, which would need no new
+# file at all: Coolify's Application `ports_mappings` field cannot express a
+# UDP port. `5566:5566` validates; `5566:5566/udp` is rejected outright
+# (HTTP 422, "The ports mappings field format is invalid.", VERIFIED against
+# a live 4.3.10 instance). Its reverse proxy only speaks HTTP(S), so an
+# Application can publish TCP or nothing — and `ingest` receives UDP
+# datagrams (docs/protocol.md) and nothing else. A compose `ports:` entry has
+# no such restriction, which is the entire reason for this file.
+#
+# See docs/deployment.md, "`ingest` cannot be a Coolify Application at all".
+
+services:
+  ingest:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Subcommand only: docker-entrypoint.sh supplies the interpreter and
+    # script path, and an explicit `command:` takes its passthrough branch —
+    # which also means this container deliberately does NOT auto-migrate.
+    # Only the `serve` role does (the `api` Application), so the two never
+    # race: packages/db's migration runner takes no advisory lock.
+    command: ["ingest"]
+    restart: unless-stopped
+
+    environment:
+      # Reaches the Coolify PostgreSQL resource by its UUID, which is its
+      # container name and therefore its hostname on the `coolify` network.
+      HOMECSI_DATABASE_HOST: ${HOMECSI_DATABASE_HOST:?set to the database resource UUID}
+      HOMECSI_DATABASE_PORT: ${HOMECSI_DATABASE_PORT:-5432}
+      HOMECSI_DATABASE_NAME: ${HOMECSI_DATABASE_NAME:-postgres}
+      HOMECSI_DATABASE_USER: ${HOMECSI_DATABASE_USER:-postgres}
+      HOMECSI_DATABASE_PASSWORD: ${HOMECSI_DATABASE_PASSWORD:?required}
+      # Required by the config schema even though ingest serves no HTTP:
+      # packages/config validates the whole document, not the subset one
+      # role happens to read.
+      HOMECSI_SERVER_API_TOKEN: ${HOMECSI_SERVER_API_TOKEN:?required}
+      HOMECSI_SERVER_UDP_HOST: ${HOMECSI_SERVER_UDP_HOST:-0.0.0.0}
+      HOMECSI_SERVER_UDP_PORT: ${HOMECSI_UDP_PORT:-5566}
+      HOMECSI_CONFIG_PATH: /etc/homecsi/config.yaml
+      HOMECSI_LOGGING_LEVEL: ${HOMECSI_LOGGING_LEVEL:-info}
+
+    ports:
+      # World-reachable by design, and it has to be: the ESP32 nodes are on a
+      # home LAN and cannot join a tailnet, so unlike the dashboard this port
+      # cannot hide behind one. Every datagram is ChaCha20-Poly1305 AEAD under
+      # a per-node PSK and is dropped before parsing if it does not
+      # authenticate (docs/protocol.md) — that is what makes the exposure
+      # acceptable, not obscurity. It is still a scannable port and a
+      # cheap-packet DoS surface.
+      #
+      # Confirm the host firewall allows it. On the reference host the
+      # DOCKER-USER chain drops selected published ports on the public
+      # interface; this one must NOT be among them.
+      - "${HOMECSI_UDP_PORT:-5566}:${HOMECSI_UDP_PORT:-5566}/udp"
+
+    volumes:
+      - homecsi_data:/data
+      # The per-node PSK registry, mounted read-only from the file Coolify
+      # already manages for the `api` Application — one file, one editor (the
+      # api resource's Storage tab), no second copy of key material to drift.
+      # The path embeds that Application's UUID; if `api` is ever recreated,
+      # this path changes with it.
+      - '/data/coolify/applications/${HOMECSI_API_APP_UUID:?set to the api Application UUID}/etc/homecsi/config.yaml:/etc/homecsi/config.yaml:ro'
+
+    # No healthcheck, deliberately. ingest is UDP-only with no request/response
+    # surface to probe honestly, and a check that always reports healthy is
+    # worse than none: it would stop `restart: unless-stopped` from being the
+    # thing that notices. See ops/docker-compose.coolify.yml's identical note.
+
+    networks:
+      - coolify
+
+networks:
+  coolify:
+    external: true
+    name: coolify
+
+volumes:
+  homecsi_data:
