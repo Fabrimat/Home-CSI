@@ -84,6 +84,28 @@ updating both sides.
   stub body when you implement the real thing; don't leave that message in
   a working command.
 
+## Public-repo hygiene
+
+This repo is currently private but may go public. Real secrets already
+can't land here — `.gitignore` excludes `ops/config.yaml` (per-node PSKs),
+`ops/.env`, and `data/**`. The remaining risk is narrower but still real:
+**real infrastructure identifiers pasted into docs while writing up a
+"VERIFIED against a live host" finding** — an actual Tailscale MagicDNS
+name, a real hostname/UUID, a real public IP. These aren't secrets (they
+don't grant access on their own) but they fingerprint the operator's real
+deployment and don't belong in a doc meant to read generically. Found and
+scrubbed once already (a real `*.ts.net` hostname in
+`docs/deployment.md`'s Tailscale section, both from the working tree and
+from the commit that introduced it — see git history around 2026-08-24 if
+you need the precedent).
+
+When writing up a verification result in `docs/`, use a placeholder in the
+same shape as the real thing (`host.example-tailnet.ts.net`,
+`10.x.x.x`/`<public-ip>`, `db-uuid-placeholder`) — never the value actually
+used to verify it. This is not something linting catches; it's a
+review-time judgment call the next `docs/deployment.md` edit needs to make
+for itself.
+
 ## Hard rules (do not violate these anywhere in the pipeline)
 
 - **Amplitude-first.** ESP32 CSI phase has no hardware TX/RX phase lock and
