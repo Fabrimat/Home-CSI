@@ -58,7 +58,7 @@ describe('runLabelSubcommand: session lifecycle', () => {
   it('refuses a bare `session stop` (no --session) when the default-resolved open session is a training-mode walk', async () => {
     const store = createInMemoryLabelStore();
     const features = createInMemoryFeaturesReader([]);
-    // Mirrors web/ui/src/views/training.ts's TRAINING_MARKER convention.
+    // Mirrors web/ui/src/groundTruthLogic.ts's TRAINING_MARKER convention.
     const session = await store.createSession(Date.now(), '[training] walking the house');
 
     await expect(runLabelSubcommand(['session', 'stop'], {}, store, features, testDeps())).rejects.toThrow(

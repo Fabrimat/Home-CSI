@@ -31,7 +31,16 @@ export interface CaptureWriterLike {
 export interface DbWriteQueueLike {
   enqueueCsiBatch(nodeId: number, bootEpoch: number, seq: number, receivedAt: Date, batch: CsiBatch): void;
   enqueueHeartbeat(nodeId: number, bootEpoch: number, seq: number, receivedAt: Date, hb: Heartbeat): void;
-  upsertNode(node: { id: number; name: string; room: string; expectedMac?: string }): Promise<void>;
+  upsertNode(node: {
+    id: number;
+    name: string;
+    room: string;
+    expectedMac?: string;
+    /** Signed floor index (basement negative); defaults to 0 when omitted -- see packages/config's `nodeSchema` and migration 010. */
+    floor?: number;
+    /** Optional {x, y} metres on that floor's own operator-chosen origin -- omitted means "not yet placed" (see nodeSchema's no-trilateration contract). */
+    position?: { x: number; y: number };
+  }): Promise<void>;
   getMetrics(): DbWriteQueueMetrics;
   close(): Promise<void>;
 }

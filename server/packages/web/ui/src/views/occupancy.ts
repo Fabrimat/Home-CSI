@@ -15,6 +15,7 @@ import {
   clampInterval,
   findLabelDisagreements,
   labelToMsInterval,
+  parseSelectionFromHash,
   retentionBoundaries,
   systemEstimateOverSelection,
   type LabelDisagreement,
@@ -196,6 +197,25 @@ export function renderOccupancy(container: HTMLElement): () => void {
     selectionPanel,
   );
   chartArea.append(h('h2', {}, 'Occupancy timeline'), loadingState('Loading occupancy history…'));
+
+  // --- Deep-linked preselection (#/occupancy?from=<iso>&to=<iso>) -----------
+  // Applied before `init()` so the first `load()` already renders with this
+  // selection: the ground-truth view's Missions mode links straight to the
+  // stretch it wants reviewed, and landing here with nothing selected would
+  // make the operator re-find it by hand. Absent or malformed params leave
+  // the default (no selection) untouched -- see `parseSelectionFromHash`.
+  const deepLinked = parseSelectionFromHash(location.hash);
+  if (deepLinked !== null) {
+    // The window `load()` fetches is `last <preset>` ending now, so a linked
+    // stretch further back than the default preset would sit off-chart. Pick
+    // the narrowest preset that still reaches back to it (widest if it
+    // predates even that -- the selection is then out of view, but the
+    // correction panel below still works on it).
+    const reachBackMs = Date.now() - deepLinked.fromMs;
+    const preset = RANGE_PRESETS.find((p) => p.ms >= reachBackMs) ?? RANGE_PRESETS[RANGE_PRESETS.length - 1]!;
+    rangeSelect.value = String(preset.ms);
+    setSelection(deepLinked);
+  }
 
   // --- Selection plumbing --------------------------------------------------
 

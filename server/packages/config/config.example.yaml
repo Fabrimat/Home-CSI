@@ -39,16 +39,29 @@ database:
 # (docs/protocol.md section 3). `psk` is the 32-byte ChaCha20-Poly1305 key,
 # base64-encoded (docs/protocol.md section 5) — generate per node with e.g.
 # `openssl rand -base64 32`, never reuse across nodes.
+#
+# `floor`/`position` are both optional (a deployment that hasn't measured
+# anything yet still validates; `floor` defaults to 0) and exist only for
+# GET /api/topology's link geometry and the dashboard's floor plan — never
+# for localising a person (see src/schema.ts's positionSchema comment).
+# `position` is {x, y} in METRES, relative to an origin YOU pick per floor
+# — e.g. tape-measure from one corner of that floor's plan, or from one
+# node you designate as that floor's (0, 0). Different floors do not need
+# to share an origin.
 nodes:
   - id: 1
     name: "node-living-room"
     room: "living-room"
     psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
     expectedMac: "aa:bb:cc:dd:ee:01"
+    floor: 0
+    position: { x: 0, y: 0 } # this node is this floor's chosen origin
   - id: 2
     name: "node-hallway"
     room: "hallway"
     psk: "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA="
+    floor: 0
+    position: { x: 4.2, y: 1.1 } # metres from node 1, measured along the hallway
 
 storage:
   # Raw replay capture tree (docs/architecture.md "Data lifecycle").

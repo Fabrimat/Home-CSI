@@ -261,3 +261,36 @@ export function classifySelectionRetention(
   if (availability.status === 'failed') return 'unavailable';
   return retentionZoneForRange(fromMs, toMs, availability.config, nowMs);
 }
+
+// --- Occupancy-timeline deep links ------------------------------------------
+
+/**
+ * The `#/occupancy?from=<iso>&to=<iso>` hash a "Go" action links to when it
+ * wants the occupancy timeline to open with a stretch already selected (the
+ * ground-truth view's Missions mode). Kept next to its parser below so the
+ * two halves of the contract can't drift.
+ */
+export function occupancyDeepLinkHash(fromMs: number, toMs: number): string {
+  const from = new Date(fromMs).toISOString();
+  const to = new Date(toMs).toISOString();
+  return `#/occupancy?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+}
+
+/**
+ * The preselected range in a `#/occupancy?from=&to=` hash, or `null` when
+ * there isn't a usable one -- an absent, malformed, or non-ordered pair must
+ * leave the timeline's own default (no selection) untouched rather than
+ * applying a garbage selection the operator then has to notice and clear.
+ */
+export function parseSelectionFromHash(hash: string): { fromMs: number; toMs: number } | null {
+  const queryStart = hash.indexOf('?');
+  if (queryStart === -1) return null;
+  const params = new URLSearchParams(hash.slice(queryStart + 1));
+  const from = params.get('from');
+  const to = params.get('to');
+  if (from === null || to === null) return null;
+  const fromMs = Date.parse(from);
+  const toMs = Date.parse(to);
+  if (Number.isNaN(fromMs) || Number.isNaN(toMs) || toMs <= fromMs) return null;
+  return { fromMs, toMs };
+}

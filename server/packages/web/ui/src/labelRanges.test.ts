@@ -6,6 +6,8 @@ import {
   findLabelDisagreements,
   intervalsOverlap,
   labelToMsInterval,
+  occupancyDeepLinkHash,
+  parseSelectionFromHash,
   retentionBoundaries,
   retentionZoneAt,
   retentionZoneForRange,
@@ -242,5 +244,23 @@ describe('classifySelectionRetention', () => {
     const wellWithinWindow = { fromMs: now - 1_000, toMs: now };
     expect(classifySelectionRetention({ status: 'loading' }, wellWithinWindow.fromMs, wellWithinWindow.toMs, now)).not.toBe('ok');
     expect(classifySelectionRetention({ status: 'failed' }, wellWithinWindow.fromMs, wellWithinWindow.toMs, now)).not.toBe('ok');
+  });
+});
+
+describe('occupancy deep links', () => {
+  it('round-trips a range through the hash', () => {
+    const fromMs = T('2026-01-01T12:00:00.000Z');
+    const toMs = T('2026-01-01T13:30:00.000Z');
+    const hash = occupancyDeepLinkHash(fromMs, toMs);
+    expect(hash.startsWith('#/occupancy?')).toBe(true);
+    expect(parseSelectionFromHash(hash)).toEqual({ fromMs, toMs });
+  });
+
+  it('ignores a hash with no usable range rather than applying a garbage selection', () => {
+    expect(parseSelectionFromHash('#/occupancy')).toBeNull();
+    expect(parseSelectionFromHash('#/occupancy?from=2026-01-01T12:00:00Z')).toBeNull();
+    expect(parseSelectionFromHash('#/occupancy?from=nope&to=2026-01-01T12:00:00Z')).toBeNull();
+    // to <= from: not a range.
+    expect(parseSelectionFromHash('#/occupancy?from=2026-01-01T13:00:00Z&to=2026-01-01T12:00:00Z')).toBeNull();
   });
 });

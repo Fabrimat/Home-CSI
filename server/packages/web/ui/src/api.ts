@@ -70,3 +70,11 @@ export function apiPost<T>(path: string, body?: unknown): Promise<T> {
 export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   return apiFetch<T>(path, { method: 'PATCH', body: body === undefined ? undefined : JSON.stringify(body) });
 }
+
+// Added by brief B3 (unified ground-truth view): Annotate mode's undo is
+// `DELETE /api/annotations/:id` -- the one write in this app that is
+// deliberately reversible (see routes/annotations.ts for why annotations,
+// unlike labels, may be deleted).
+export function apiDelete<T>(path: string): Promise<T> {
+  return apiFetch<T>(path, { method: 'DELETE' });
+}

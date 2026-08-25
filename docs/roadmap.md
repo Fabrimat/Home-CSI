@@ -168,13 +168,23 @@ time window (1h/6h/24h/7d) with optional ground-truth label overlay from
 labeling sessions. It includes session start/stop controls and per-moment
 annotation (occupancy count + free-text notes), allowing the operator to
 mark the system's output as correct or incorrect, confirm stretches it got
-right, and attach context notes — no per-room or per-link drill-down yet.
-A separate **training mode** view (below) covers the live, guided
-cold-start flow rather than after-the-fact correction.
+right, and attach context notes. **This no longer lacks per-room or
+per-link drill-down**: the **House map** view (`views/houseMap.ts`, backed
+by `GET /api/topology`, `packages/api/src/routes/topology.ts`) draws a
+per-floor plan with links that glow by recent motion and per-room "zones"
+aggregating the resolved links touching that room — see "Node placement
+and the House map" below for exactly what that view is, and is not,
+allowed to claim. The guided, live cold-start flow and the one-tap manual
+annotation controls this section used to describe as two deliberately
+separate tools (`views/training.ts` and `views/recording.ts`, "the two are
+not merged") have in fact been merged, into a single **Ground truth** view
+(`views/groundTruth.ts`) with three modes — see "Ground truth view: Live,
+Annotate, and Missions modes" below.
 
 **The feedback loop: correction as the primary interaction.**
 
-An operator reviewing the occupancy timeline does three things:
+An operator reviewing the occupancy timeline, or using the Ground truth
+view's Annotate mode, does four things:
 1. **Mark stretches the system got wrong** — "it said empty, but we were
    home" or "it said 2+, but it was just me" — by selecting a time range,
    recording the true occupancy count (0, 1, or 2+), and optionally a
@@ -189,25 +199,62 @@ An operator reviewing the occupancy timeline does three things:
    one room" — attached to individual labels or the session as a whole,
    captured in the free-text `notes` column for later inspection and
    model conditioning.
+4. **Annotate a non-occupancy event** — "that spike at 19:42 is the
+   microwave" — a categorised, point-or-interval marker
+   (`event_annotations`, migration 009; `POST /api/annotations`,
+   `packages/api/src/routes/annotations.ts`) that carries **no occupancy
+   count at all**. This is deliberately *not* a fourth kind of label:
+   `labels` and `event_annotations` are separate tables, not one table with
+   a `kind` discriminator, because `packages/labeling/src/datasetExport.ts`'s
+   `resolveTickConflicts` resolves overlapping rows at the same tick by
+   "highest `labelId` wins" across every row `labels` hands it — it has no
+   notion of "this row isn't really ground truth, skip it". If a microwave
+   annotation lived in `labels`, one export call that forgot to filter it
+   out would let that annotation *outrank and silently displace* a real
+   correction's rows at any tick they share — quietly deleting ground truth
+   from the dataset, not merely diluting it with noise. Living in a
+   structurally separate table the dataset exporter never reads makes that
+   entire class of bug impossible by construction. See migration 009's
+   comment header for the full reasoning, and `docs/architecture.md` "Data
+   lifecycle" for why an annotation also deliberately preserves no raw
+   features.
 
-The debug UI today already ships these controls; a dashboard extends them
-with better UX (multi-select ranges, bulk operations), richer context
-(room-by-room drill-down), and persistence across sessions (historical
-comparison, previous corrections).
+The debug UI today already ships these controls, split across the
+Occupancy timeline's correction/confirmation panel (items 1-3,
+`views/occupancy.ts`) and Ground truth's Annotate mode (item 4,
+`views/groundTruth.ts`); a fuller production dashboard would still extend
+them with better UX (multi-select ranges, bulk operations) and persistence
+across sessions (historical comparison, previous corrections). The
+"richer context (room-by-room drill-down)" this paragraph used to name as
+future work now exists, but in a different shape than originally imagined:
+not context attached to a label, but the House map's motion-attribution
+zones (see "Node placement and the House map" below) — read that section's
+honesty constraint before assuming it means the dashboard can say which
+room a correction's occupant was actually in.
 
-**Training mode for cold-start bootstrap.**
+**Ground truth view: Live, Annotate, and Missions modes.**
 
 Before any trained model exists, the system needs a labelled corpus to
-train on. The debug UI ships a **training mode** view
-(`server/packages/web/ui/src/views/training.ts`, brief B14) for exactly
-that cold start: a guided flow where the operator walks through the house
-live, declaring ground truth as they move. This is a deliberately separate
-tool from the point-in-time manual annotation controls in
-`views/recording.ts` — the two are not merged. Training mode's own intro
-text points operators at the Occupancy timeline view for reviewing or
-correcting past predictions, and names Recording controls as the simpler
-point-in-time annotation tool it is. Neither of those two views carries a
-pointer back to training mode.
+train on, a way to record non-occupant RF confounders without lying about
+occupancy to do it, and a way to see what is worth reviewing before it ages
+out. Earlier revisions of this document described the first of those as a
+standalone **training mode** view (`views/training.ts`, brief B14) and
+called it "a deliberately separate tool from the point-in-time manual
+annotation controls in `views/recording.ts` — the two are not merged".
+**That is no longer accurate.** Both were merged into a single **Ground
+truth** view (`views/groundTruth.ts`), switched between three modes via one
+`<fieldset>` radio group rather than three separate pages — **Live**,
+**Annotate**, and **Missions** — that share one underlying job: telling the
+system what actually happened.
+
+**Live mode — the cold-start walk.** This absorbs the guided,
+live-walkthrough flow the standalone training-mode view used to provide
+wholesale (every ordering guarantee below is unchanged), and it subsumes
+the job the old `views/recording.ts` did too: tapping a state below is at
+once "start declaring ground truth on a walk through the house" and
+"manually record a single moment's true occupancy", the same
+`label_sessions`/`labels` write serving both use cases that used to need
+two separate UIs.
 
 - **Starts a training session** with no prior data, just a clear
   declaration of "house empty" / "just me" / "two or more of us" (the
@@ -242,15 +289,114 @@ lifecycle, captures stay 7 days). Later, continuous operator feedback
 (corrections of prediction mistakes, via the correction/confirmation panel
 on the occupancy timeline, `views/occupancy.ts`) refines the model
 incrementally. The **trained model itself** remains future work (see
-"Trained-model inference" above): training mode builds the labelled
-corpus, it does not train anything.
+"Trained-model inference" above): Live mode builds the labelled corpus, it
+does not train anything.
+
+**Annotate mode — one-tap confounder markers.** Already described in full
+as the fourth item of "The feedback loop" above: a categorised,
+point-or-interval marker (`event_annotations`, migration 009;
+`POST /api/annotations`) that carries no occupancy count, because a
+microwave or a door is not an occupant and forcing a count onto one would
+poison the training corpus with a false ground-truth row. Unlike `labels`,
+which is append-only (`docs/architecture.md`), annotations can be deleted
+(`DELETE /api/annotations/:id`, `packages/api/src/routes/annotations.ts`)
+— a fast one-tap UI guarantees mis-taps, and annotations play no part in
+dataset export, so leaving a mis-tap permanently on the record would be
+strictly worse than allowing the delete.
+
+**Missions mode — what expires next, never a score.** Backed by
+`GET /api/coverage` (`packages/api/src/routes/coverage.ts`):
+`reviewedFraction` (how much of the retention window has a human judgement
+attached), `expiringSoon` (a short, capped list of unreviewed stretches
+near the window's oldest edge — the ones about to fall off the 7-day cliff
+described under "The 7-day deadline" below), `confirmations` and
+`corrections` (counts by `labels.source`), and `annotations`/
+`categoriesUsed` (how much and how varied the confounder-marking has
+been). It deliberately exposes **no total-label count and no streak**, and
+the Missions UI does not compute one client-side to fill that gap either.
+This is a load-bearing design constraint, not an unfinished feature: a
+volume incentive on a training corpus — points for labelling, a streak to
+keep alive — rewards *producing* labels, not producing *true* ones, and
+junk labels are the one thing that can ruin the corpus this whole mode
+exists to build. What Missions rewards instead is coverage (fraction of
+the window reviewed), diversity (how many of the six annotation categories
+are represented), and deadline saves (the `expiringSoon` list — work that
+becomes permanently unrecoverable, not merely stale, if ignored). This is
+recorded here deliberately: a future contributor asked to make Missions
+"more motivating" will reach for a score or a streak as the obvious lever —
+that is exactly the lever this paragraph rules out.
+
+**Node placement and the House map.**
+
+`packages/config/src/schema.ts`'s `nodeSchema` gained two optional fields
+per node: `floor` (a signed integer, default `0` — a basement or garage
+below the operator's own "ground floor" can be `-1`, `-2`, etc.) and
+`position: {x, y}` in **metres**, relative to an origin the operator picks
+**per floor** (a corner of that floor's own plan, or one particular node on
+it — there is no single origin shared across the whole house). Migration
+010 adds the matching storage: `nodes.floor` (`smallint NOT NULL DEFAULT
+0`) and nullable `nodes.pos_x`/`nodes.pos_y`. Both position columns are
+nullable on purpose: an operator who hasn't measured anything yet must
+still be able to run the system, and `NULL` means "not placed", never
+`(0, 0)`, which would silently draw a node in the wrong spot instead of
+honestly rendering nothing for it.
+
+`GET /api/topology` (`packages/api/src/routes/topology.ts`) turns that
+placement, plus the per-link motion signal `@homecsi/features` already
+computes (`features` is keyed `(time, node_id, link_mac)`, and
+`packages/features/src/baseline.ts` computes a per-link baseline-relative
+deviation that is comparable across links), into a floor-plan-ready view:
+`nodes` (with position), `links` (endpoints, midpoint, length, and which
+two rooms a link spans, whenever both endpoints are placed and the peer
+resolves — `geometry: null` otherwise, never guessed), and `zones`
+(per-room/floor aggregates of the resolved links touching that room). The
+**House map** view (`views/houseMap.ts`) draws it: links glow by recent
+motion, and each node's halo reflects its room's zone.
+
+**What this legitimately buys, and what it must never be read as.**
+Per-link motion attribution is real and data-backed — "the link between the
+kitchen and hallway nodes shows motion" is a defensible statement about a
+region, derived entirely from amplitude. Aggregating that per room gives
+zone-level motion attribution. `GET /api/topology` says so plainly in its
+own response: "Per-room/floor aggregate of link-path motion deviation
+(`feature_vector.baselineDeviation`) from links whose geometry resolved.
+This is NOT a person count or position estimate -- CSI senses motion on a
+link, not where a person is" (`ZONE_SEMANTICS`, `routes/topology.ts`), and
+the House map view says the same thing to an operator in its own words:
+"This shows which paths through the house are disturbed, not where anyone
+is" (`HONESTY_SENTENCE`, `views/houseMap.ts`). What it is **not**, under
+any phrasing: this system does not localise a person, does not estimate
+anyone's position, does not count people per room, and does not track
+anyone. ESP32 CSI phase has no hardware TX/RX lock and is not corrected
+for CFO/SFO (`docs/architecture.md` "Amplitude-first"), so nothing here may
+depend on phase, angle-of-arrival, time-of-flight, or trilateration — the
+coordinates exist for **geometry and drawing only** (deriving a link's
+endpoints/midpoint/length and letting the dashboard draw a floor plan),
+never for inferring where anyone is.
+
+**`config.yaml` is the single source of truth for placement — there is
+deliberately no dashboard write-back.** Ingest re-projects `config.nodes`
+into the `nodes` table's placement columns on every start (`upsertNode`,
+`packages/storage/src/dbWriter.ts`), so those columns are a projection, not
+independently editable state. The House map's "level editor" panel lets an
+operator drag a node (or type x/y for one) to preview a position and emits
+a `config.yaml` snippet to paste by hand — it never calls a write endpoint,
+because there is no `POST`/`PATCH` route for placement at all. A save
+button that wrote positions straight into the database (or through some
+future API route) would create silent split-brain state: the database
+would show one placement and `config.yaml` another, and the very next
+ingest restart would overwrite the database's copy with no sign that
+anything had changed. That is a worse failure mode than not offering the
+write path at all — it looks like it worked, right up until the next
+restart quietly undoes it.
 
 **Integration constraint: manual sessions only, no weak labels.**
 
 Dashboard-created labelling sessions — the correction/confirmation panel on
-the occupancy timeline (`views/occupancy.ts`), the manual annotation
-controls in `views/recording.ts`, and training mode (`views/training.ts`)
-— are never weak-flagged.
+the occupancy timeline (`views/occupancy.ts`) and Ground truth's Live mode
+(`views/groundTruth.ts`, the merged successor to the standalone training
+mode and point-in-time annotation views this document used to describe as
+separate) — are never weak-flagged.
 `packages/labeling/src/trainingPreservation.ts` preserves raw per-link
 feature rows to `training_features` (the permanent training archive) **only
 for non-weak sessions**, not weak/automatic ones. Weak labels (like the
@@ -263,14 +409,20 @@ sessions, their underlying features would silently evaporate after 7 days,
 poisoning the training set. Sessions created via the dashboard have their
 `notes` field checked against the weak-label prefix
 `[weak:phone-presence]` and never start with it — the existence of any
-other note at all (or `null`) marks them as non-weak.
+other note at all (or `null`) marks them as non-weak. Ground truth's
+Annotate mode sits outside this whole mechanism, not as a special case of
+it: `event_annotations` rows are not `label_sessions`/`labels` rows at all
+(migration 009), so there is no session to weak-flag and no preservation
+attempt to make for them in the first place — see "Ground truth view:
+Live, Annotate, and Missions modes" above for why annotations preserve no
+features by design.
 
 Labels also carry an explicit `source` column (migration 008) recording how
 each one was produced: the correction/confirmation UI writes
-`'manual'`/`'confirmed'`, training mode writes `'training'`, and the
-phone-presence cron writes `'weak:phone-presence'`. A future training run
-can weight or filter examples by this provenance, not just by which session
-they happened to land in.
+`'manual'`/`'confirmed'`, Ground truth's Live mode writes `'training'`, and
+the phone-presence cron writes `'weak:phone-presence'`. A future training
+run can weight or filter examples by this provenance, not just by which
+session they happened to land in.
 
 **The 7-day deadline: a real UX constraint.**
 

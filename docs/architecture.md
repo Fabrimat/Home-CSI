@@ -147,6 +147,45 @@ LLTF-only records are far smaller than LLTF+HT-LTF records. **No component
 may assume a fixed subcarrier count**; every consumer of raw CSI bytes must
 derive layout from the record's own `csi_format` and `csi_len` fields.
 
+## Node placement and zone attribution
+
+Nodes may optionally declare a `floor` and a `position: {x, y}` in metres
+(`packages/config/src/schema.ts`'s `nodeSchema`; storage in `nodes.floor`/
+`pos_x`/`pos_y`, migration 010) -- a relative 2D position on a plane whose
+origin the operator picks **per floor** (a corner of that floor's own plan,
+or one particular node on it), never one origin shared across the whole
+house. `GET /api/topology` (`packages/api/src/routes/topology.ts`) uses
+that placement, together with the per-link motion signal `@homecsi/features`
+already computes (`features` is keyed `(time, node_id, link_mac)`, and
+`packages/features/src/baseline.ts` computes a per-link baseline-relative
+deviation that is comparable across links), to derive link geometry
+(endpoints, midpoint, length, which two rooms a link spans -- `null`
+whenever a peer is unresolved or either endpoint lacks a placed position,
+never a fabricated coordinate) and a per-room/floor "zone" aggregate of the
+resolved links touching that room. The **House map** view
+(`server/packages/web/ui/src/views/houseMap.ts`) draws it: links glow by
+recent motion, and each room gets a motion-coloured halo.
+
+This is a real, defensible capability -- "the link between the kitchen and
+hallway nodes shows motion" is a data-backed statement about a region,
+derived entirely from amplitude and each node's own declared position --
+and aggregating it per room gives legitimate **zone-level motion
+attribution**: which paths through the house are disturbed. It is also,
+deliberately, the full extent of what placement buys. Coordinates exist
+for **geometry and drawing only**: the "Amplitude-first" constraint above
+means ESP32 CSI phase has no hardware TX/RX lock and is not corrected for
+CFO/SFO, so nothing in this system may depend on phase, angle-of-arrival,
+time-of-flight, or trilateration. Consequently, no component may -- or does
+-- use a node's position to localise a person, estimate anyone's position,
+count people per room, or track anyone. `GET /api/topology`'s own
+`zoneSemantics` response field and the House map's on-screen honesty banner
+both say this to the operator directly, in the response and the UI, not
+only in a source comment. Node placement is grounding for *drawing*, a
+projection of `config.yaml` (the single source of truth -- ingest
+re-projects it into `nodes` on every start; there is deliberately no
+dashboard write-back, see `docs/roadmap.md` "Node placement and the House
+map"), never an input to any inference about where a person is.
+
 ## Data lifecycle
 
 The guiding rule (brief B8): keep raw data only for a **short debug
@@ -184,6 +223,29 @@ accidental side effect of however long raw data happens to survive.
      transitions-plus-keepalive write pattern produces, dropping it would
      save effectively no disk while permanently destroying the project's
      own output. It is kept forever, in plain, trivially-queryable rows.
+   - `event_annotations` (migration 009) -- categorised, point-or-interval
+     markers that explain *why* something in that forever `occupancy_states`
+     log looks the way it does ("that 19:42 false-positive latch was the
+     microwave") -- is, like `occupancy_states`, a plain relational table
+     with **no retention or compression policy of its own**, and is
+     expected to stay permanent and small: volume is bounded by how much an
+     operator actually taps, not by an ingest rate. Unlike the
+     training-set preservation machinery in the next point, annotations
+     deliberately have **no feature-preservation path at all** -- considered
+     and rejected, not merely unbuilt. A point annotation would preserve
+     only about `config.features.windowMs` (roughly 2 seconds) of raw
+     features around it, far too short a slice to ever function as a
+     usable confounder signature. And when a confounder genuinely matters
+     to training, it matters as a **hard negative on the occupancy
+     target** ("the house was empty and this spike happened anyway"),
+     which needs a real occupancy label, not a longer-lived annotation -- a
+     path that already exists and is already fully plumbed:
+     `POST /api/labels/corrections` with `occupancyCount: 0`. Annotations
+     are also, unlike `labels`, deletable (`DELETE /api/annotations/:id`):
+     they carry no occupancy assertion and play no part in dataset export,
+     so a fast one-tap annotation UI's inevitable mis-taps can be undone
+     without the append-only guarantee `labels` needs for training-corpus
+     integrity.
 4. **Training-set preservation**: `features` rows are chunk-granular under
    `drop_chunks`, which cannot selectively exempt individual rows -- so
    rows worth keeping past 7 days are **copied out**, not left in place.

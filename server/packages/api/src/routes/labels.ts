@@ -12,6 +12,28 @@ const DEFAULT_LABELS_LIMIT = 500;
 
 const sessionsQuerySchema = z.object({
   limit: boundedLimit(DEFAULT_SESSIONS_LIMIT, MAX_SESSIONS_LIMIT),
+  /**
+   * `open=true` -> only sessions still running (`ended_at IS NULL`);
+   * `open=false` -> only stopped ones. Absent means no filter at all
+   * (unchanged behaviour for existing callers).
+   *
+   * Deliberately an explicit `'true'|'false'` enum rather than
+   * `z.coerce.boolean()`, which coerces the *string* `'false'` to `true`.
+   */
+  open: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  /**
+   * Server-side prefix match on `notes`. Exists so the ground-truth view can
+   * ask "is there an open `[training]` session?" in one query instead of
+   * paging `limit=500` newest-first and scanning client-side: every
+   * dashboard correction creates its own `label_sessions` row
+   * (`POST /api/labels/corrections`), so enough corrections would push an
+   * open training session off the end of even the maximum page and silently
+   * orphan a walk in progress.
+   */
+  notesPrefix: z.string().min(1).max(200).optional(),
 });
 
 const startSessionBodySchema = z.object({
@@ -146,8 +168,8 @@ export function registerLabelRoutes(
   preservation?: LabelPreservationDeps,
 ): void {
   app.get('/api/labels/sessions', async (request) => {
-    const { limit } = parseOrThrow(sessionsQuerySchema, request.query);
-    const sessions = await db.listLabelSessions({ limit });
+    const { limit, open, notesPrefix } = parseOrThrow(sessionsQuerySchema, request.query);
+    const sessions = await db.listLabelSessions({ limit, open, notesPrefix });
     return { sessions, limit };
   });
 

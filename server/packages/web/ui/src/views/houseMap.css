@@ -1,0 +1,67 @@
+/*
+ * Styles for the house map view (views/houseMap.ts). Kept in its own file
+ * and imported only from that module -- style.css is owned by main.ts /
+ * B18's dashboard design system and a parallel arm (B3) is editing UI at
+ * the same time, so this view must not touch it. Colour variables
+ * (--accent, --border, --bg-panel-raised, --text-dim, --mono, ...) are
+ * defined globally on :root in style.css and are reused here as-is.
+ */
+
+.house-map .honesty-banner p:first-of-type {
+  font-weight: 600;
+}
+
+.house-map svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.placement-snippet {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  white-space: pre;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  margin: 0;
+}
+
+.zone-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+/*
+ * A pulsing glow for a link/zone the API marked `motionActive` -- a plain
+ * CSS animation rather than a JS interval: it costs nothing on every 5s
+ * poll re-render and there is no timer to leak, since it just stops
+ * whenever the element it's on is torn down/removed.
+ */
+@keyframes house-map-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.house-map .link-active,
+.house-map .zone-halo-active {
+  animation: house-map-pulse 1.6s ease-in-out infinite;
+}

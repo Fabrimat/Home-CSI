@@ -22,8 +22,8 @@ function baseConfig(): Config {
       pool: { min: 1, max: 1 },
     },
     nodes: [
-      { id: 1, name: 'a', room: 'r1', psk: Buffer.alloc(32).toString('base64') },
-      { id: 2, name: 'b', room: 'r2', psk: Buffer.alloc(32).toString('base64') },
+      { id: 1, name: 'a', room: 'r1', psk: Buffer.alloc(32).toString('base64'), floor: 0 },
+      { id: 2, name: 'b', room: 'r2', psk: Buffer.alloc(32).toString('base64'), floor: 0 },
     ],
     storage: {
       captureDir: '.',

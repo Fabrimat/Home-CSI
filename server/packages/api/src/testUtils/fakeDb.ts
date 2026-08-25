@@ -1,10 +1,14 @@
 import type {
+  AnnotationRow,
+  CoverageInputs,
   CsiPoint,
   FeatureRow,
   HeartbeatRow,
   HomeCsiDb,
   LabelRow,
   LabelSessionRow,
+  LabelSource,
+  LinkMotionSummary,
   LinkSummary,
   NodeLiveness,
   OccupancyRow,
@@ -28,8 +32,10 @@ export class FakeHomeCsiDb implements HomeCsiDb {
   occupancyStates: OccupancyRow[] = [];
   labelSessions: LabelSessionRow[] = [];
   labels: LabelRow[] = [];
+  annotations: AnnotationRow[] = [];
   private nextSessionId = 1;
   private nextLabelId = 1;
+  private nextAnnotationId = 1;
 
   async healthCheck(): Promise<boolean> {
     return this.healthy;
@@ -159,8 +165,14 @@ export class FakeHomeCsiDb implements HomeCsiDb {
     };
   }
 
-  async listLabelSessions(params: { limit: number }): Promise<LabelSessionRow[]> {
-    return this.labelSessions.slice(0, params.limit);
+  async listLabelSessions(params: { limit: number; open?: boolean; notesPrefix?: string }): Promise<LabelSessionRow[]> {
+    // Mirrors PgHomeCsiDb.listLabelSessions' filters: `open` on
+    // `ended_at IS NULL`, `notesPrefix` as a literal prefix (NULL notes
+    // never match, same as `starts_with(NULL, ...)`).
+    return this.labelSessions
+      .filter((s) => params.open === undefined || (s.endedAt === null) === params.open)
+      .filter((s) => params.notesPrefix === undefined || (s.notes !== null && s.notes.startsWith(params.notesPrefix)))
+      .slice(0, params.limit);
   }
 
   async createLabelSession(params: { startedAt: Date; notes?: string }): Promise<LabelSessionRow> {
@@ -235,5 +247,120 @@ export class FakeHomeCsiDb implements HomeCsiDb {
     if (params.endTime.getTime() <= new Date(label.time).getTime()) return { status: 'invalid-end-time' };
     label.endTime = params.endTime.toISOString();
     return { status: 'updated', label };
+  }
+
+  /** Mirrors PgHomeCsiDb.listAnnotationsInRange's overlap predicate -- identical to listLabelsInRange's, see that method's own comment. */
+  async listAnnotationsInRange(params: TimeRange & { limit: number }): Promise<AnnotationRow[]> {
+    return [...this.annotations]
+      .filter((a) => {
+        const start = new Date(a.time).getTime();
+        const startsOverlap =
+          a.endTime === null ? start >= params.from.getTime() : new Date(a.endTime).getTime() > params.from.getTime();
+        return start < params.to.getTime() && startsOverlap;
+      })
+      .sort((a, b) => a.time.localeCompare(b.time))
+      .slice(0, params.limit);
+  }
+
+  async createAnnotation(params: {
+    time: Date;
+    endTime?: Date;
+    category: AnnotationRow['category'];
+    label?: string;
+    notes?: string;
+    source?: AnnotationRow['source'];
+  }): Promise<AnnotationRow> {
+    const annotation: AnnotationRow = {
+      id: this.nextAnnotationId++,
+      time: params.time.toISOString(),
+      endTime: params.endTime ? params.endTime.toISOString() : null,
+      category: params.category,
+      label: params.label ?? null,
+      notes: params.notes ?? null,
+      source: params.source ?? 'manual',
+      createdAt: new Date().toISOString(),
+    };
+    this.annotations.push(annotation);
+    return annotation;
+  }
+
+  async deleteAnnotation(params: { id: number }): Promise<boolean> {
+    const index = this.annotations.findIndex((a) => a.id === params.id);
+    if (index === -1) return false;
+    this.annotations.splice(index, 1);
+    return true;
+  }
+
+  /** Mirrors PgHomeCsiDb.getCoverageInputs -- same clamped-interval/count/distinct-category shape, computed in JS instead of SQL. */
+  async getCoverageInputs(params: TimeRange): Promise<CoverageInputs> {
+    const fromMs = params.from.getTime();
+    const toMs = params.to.getTime();
+    const overlaps = (row: { time: string; endTime: string | null }): boolean => {
+      const start = new Date(row.time).getTime();
+      const startsOverlap =
+        row.endTime === null ? start >= fromMs : new Date(row.endTime).getTime() > fromMs;
+      return start < toMs && startsOverlap;
+    };
+
+    const reviewedSources = new Set<LabelSource>(['manual', 'confirmed', 'training']);
+    const reviewedIntervals = this.labels
+      .filter((l) => reviewedSources.has(l.source) && overlaps(l))
+      .map((l) => ({
+        fromMs: Math.max(new Date(l.time).getTime(), fromMs),
+        toMs: Math.min(l.endTime ? new Date(l.endTime).getTime() : new Date(l.time).getTime(), toMs),
+      }));
+
+    const labelSourceCounts: Partial<Record<LabelSource, number>> = {};
+    for (const l of this.labels.filter(overlaps)) {
+      labelSourceCounts[l.source] = (labelSourceCounts[l.source] ?? 0) + 1;
+    }
+
+    const overlappingAnnotations = this.annotations.filter(overlaps);
+
+    return {
+      reviewedIntervals,
+      labelSourceCounts,
+      annotationCount: overlappingAnnotations.length,
+      annotationCategories: [...new Set(overlappingAnnotations.map((a) => a.category))],
+    };
+  }
+
+  /**
+   * Mirrors PgHomeCsiDb.listLinkMotion: mean(|baselineDeviation|) across
+   * every in-range window per (nodeId, linkMac), plus the MOST RECENT
+   * window's own `baselineFrozen` as `motionActive` -- computed in JS
+   * instead of SQL, same real `feature_vector` field names either way (see
+   * LinkMotionSummary's doc comment).
+   */
+  async listLinkMotion(params: TimeRange & { limit: number }): Promise<LinkMotionSummary[]> {
+    const inWindow = this.features.filter(
+      (f): f is FeatureRow & { linkMac: string } =>
+        f.linkMac !== null && new Date(f.time) >= params.from && new Date(f.time) < params.to,
+    );
+
+    const byKey = new Map<string, (FeatureRow & { linkMac: string })[]>();
+    for (const f of inWindow) {
+      const key = `${f.nodeId}:${f.linkMac}`;
+      const arr = byKey.get(key) ?? [];
+      arr.push(f);
+      byKey.set(key, arr);
+    }
+
+    const summaries: LinkMotionSummary[] = [];
+    for (const rows of byKey.values()) {
+      const sorted = [...rows].sort((a, b) => a.time.localeCompare(b.time));
+      const deviations = sorted.map((r) => Math.abs(Number(r.featureVector.baselineDeviation ?? 0)));
+      const latest = sorted[sorted.length - 1] as FeatureRow & { linkMac: string };
+      summaries.push({
+        nodeId: latest.nodeId,
+        linkMac: latest.linkMac,
+        meanAbsDeviation: deviations.reduce((sum, v) => sum + v, 0) / deviations.length,
+        motionActive: Boolean(latest.featureVector.baselineFrozen),
+        sampleCount: rows.length,
+        lastSeenAt: latest.time,
+      });
+    }
+
+    return summaries.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt)).slice(0, params.limit);
   }
 }

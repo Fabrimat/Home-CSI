@@ -519,3 +519,60 @@ describe('POST /api/labels/corrections', () => {
     expect(session?.notes?.startsWith('[weak:phone-presence]')).toBe(false);
   });
 });
+
+describe('GET /api/labels/sessions -- open / notesPrefix filters', () => {
+  /** Starts a session and returns its id. */
+  async function start(app: ReturnType<typeof buildApp>, notes: string): Promise<number> {
+    const res = await app.inject({ method: 'POST', url: '/api/labels/sessions', headers: authHeader(), payload: { notes } });
+    return (res.json() as { session: { id: number } }).session.id;
+  }
+
+  function sessionsOf(res: { json: () => unknown }): Array<{ id: number; notes: string | null; endedAt: string | null }> {
+    return (res.json() as { sessions: Array<{ id: number; notes: string | null; endedAt: string | null }> }).sessions;
+  }
+
+  it('finds the one open [training] session without paging every session', async () => {
+    const { app } = makeApp();
+    const openTraining = await start(app, '[training] saturday walkthrough');
+    const stoppedTraining = await start(app, '[training] friday walkthrough');
+    await app.inject({ method: 'POST', url: `/api/labels/sessions/${stoppedTraining}/stop`, headers: authHeader() });
+    // The failure mode this filter exists for: dashboard corrections pile up
+    // newer rows in front of the open training session.
+    for (let i = 0; i < 5; i += 1) await start(app, 'dashboard correction');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/labels/sessions?open=true&notesPrefix=${encodeURIComponent('[training]')}&limit=1`,
+      headers: authHeader(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(sessionsOf(res).map((s) => s.id)).toEqual([openTraining]);
+  });
+
+  it('open=false returns only stopped sessions', async () => {
+    const { app } = makeApp();
+    await start(app, 'still running');
+    const stopped = await start(app, 'done');
+    await app.inject({ method: 'POST', url: `/api/labels/sessions/${stopped}/stop`, headers: authHeader() });
+
+    const res = await app.inject({ method: 'GET', url: '/api/labels/sessions?open=false', headers: authHeader() });
+    expect(sessionsOf(res).map((s) => s.id)).toEqual([stopped]);
+  });
+
+  it('is additive: omitting both filters returns every session, as before', async () => {
+    const { app } = makeApp();
+    await start(app, '[training] one');
+    const stopped = await start(app, 'dashboard correction');
+    await app.inject({ method: 'POST', url: `/api/labels/sessions/${stopped}/stop`, headers: authHeader() });
+
+    const res = await app.inject({ method: 'GET', url: '/api/labels/sessions', headers: authHeader() });
+    expect(sessionsOf(res)).toHaveLength(2);
+  });
+
+  it('400s on a non-boolean open value rather than silently ignoring it', async () => {
+    const { app } = makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/labels/sessions?open=yes', headers: authHeader() });
+    expect(res.statusCode).toBe(400);
+  });
+});

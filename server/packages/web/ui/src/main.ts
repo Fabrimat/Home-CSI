@@ -8,8 +8,8 @@ import { renderHealth } from './views/health.js';
 import { renderOccupancy } from './views/occupancy.js';
 import { renderFeatures } from './views/features.js';
 import { renderLogs } from './views/logs.js';
-import { renderRecording } from './views/recording.js';
-import { renderTraining } from './views/training.js';
+import { renderGroundTruth } from './views/groundTruth.js';
+import { renderHouseMap } from './views/houseMap.js';
 
 type ViewRenderer = (container: HTMLElement) => () => void;
 interface ViewDef {
@@ -34,6 +34,7 @@ const NAV_GROUPS: Array<{ label: string; views: ViewDef[] }> = [
       { path: 'overview', label: 'Overview', render: renderOverview },
       { path: 'waterfall', label: 'Live CSI waterfall', render: renderWaterfall },
       { path: 'health', label: 'Node & link health', render: renderHealth },
+      { path: 'house-map', label: 'House map', render: renderHouseMap },
     ],
   },
   {
@@ -47,8 +48,7 @@ const NAV_GROUPS: Array<{ label: string; views: ViewDef[] }> = [
   {
     label: 'Ground truth',
     views: [
-      { path: 'recording', label: 'Recording controls', render: renderRecording },
-      { path: 'training', label: 'Training mode', render: renderTraining },
+      { path: 'ground-truth', label: 'Ground truth', render: renderGroundTruth },
     ],
   },
 ];
@@ -61,7 +61,16 @@ if (!app) throw new Error('missing #app root element');
 let activeCleanup: (() => void) | null = null;
 
 function currentPath(): string {
-  const hash = location.hash.replace(/^#\/?/, '');
+  // The query string is stripped before matching, because a view path can
+  // carry parameters: Ground truth's Missions list deep-links into the
+  // occupancy timeline with a preselected range (`#/occupancy?from=…&to=…`,
+  // see labelRanges.ts's `occupancyDeepLinkHash`/`parseSelectionFromHash`).
+  // Without this split the whole `occupancy?from=…&to=…` string is compared
+  // against `ViewDef.path`, matches nothing, and the router silently falls
+  // back to VIEWS[0] -- so every "Go" link would land on Overview instead.
+  // `?? ''` because `noUncheckedIndexedAccess` is on: `split` is typed as
+  // possibly-sparse even though index 0 always exists here.
+  const hash = location.hash.replace(/^#\/?/, '').split('?')[0] ?? '';
   return hash || 'overview';
 }
 

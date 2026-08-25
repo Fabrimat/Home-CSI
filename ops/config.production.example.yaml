@@ -102,16 +102,27 @@ database:
 # entries below are deliberately DIFFERENT placeholder keys to make that
 # requirement obvious at a glance — generate a fresh, distinct key per real
 # node with `openssl rand -base64 32`, do not reuse either placeholder.
+#
+# `floor`/`position` are optional placement (see
+# server/packages/config/config.example.yaml for the full units/origin
+# explanation): `position` is {x, y} in METRES relative to an origin you
+# pick per floor (e.g. one node's own spot, as node 1 below), used only for
+# GET /api/topology's link geometry and the dashboard's floor plan — never
+# for localising a person.
 nodes:
   - id: 1
     name: "node-living-room"
     room: "living-room"
     psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
     expectedMac: "aa:bb:cc:dd:ee:01"
+    floor: 0
+    position: { x: 0, y: 0 } # this node is this floor's chosen origin
   - id: 2
     name: "node-hallway"
     room: "hallway"
     psk: "Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA="
+    floor: 0
+    position: { x: 4.2, y: 1.1 } # metres from node 1, measured along the hallway
 
 storage:
   # Container-correct: /data is the only volume mounted into `ingest`/`api`

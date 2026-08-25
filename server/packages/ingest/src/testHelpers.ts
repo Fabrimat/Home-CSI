@@ -11,6 +11,8 @@ export interface TestNodeSpec {
   room?: string;
   psk: string;
   expectedMac?: string;
+  floor?: number;
+  position?: { x: number; y: number };
 }
 
 /** Builds a minimal, schema-shaped `Config` for tests without touching `@homecsi/config`'s zod parsing. */
@@ -36,6 +38,8 @@ export function makeTestConfig(nodes: TestNodeSpec[]): Config {
       room: n.room ?? 'test-room',
       psk: n.psk,
       expectedMac: n.expectedMac,
+      floor: n.floor ?? 0,
+      position: n.position,
     })),
     storage: {
       captureDir: 'unused-in-engine-tests',

@@ -89,6 +89,28 @@ describe('DbWriteQueue: batch insert', () => {
     await queue.close();
   });
 
+  it('threads floor/position placement through to the upsert SQL params, defaulting floor to 0 and position to null when omitted', async () => {
+    const pool = new RecordingPool();
+    const queue = new DbWriteQueue(pool, { flushIntervalMs: 3_600_000 });
+
+    await queue.upsertNode({ id: 1, name: 'node-1', room: 'kitchen' });
+    expect(pool.calls[0]?.sql).toContain('floor');
+    expect(pool.calls[0]?.sql).toContain('pos_x');
+    expect(pool.calls[0]?.sql).toContain('pos_y');
+    expect(pool.calls[0]?.params).toEqual([1, 'node-1', 'kitchen', null, 0, null, null]);
+
+    await queue.upsertNode({
+      id: 2,
+      name: 'node-2',
+      room: 'basement',
+      floor: -1,
+      position: { x: 1.5, y: 2.25 },
+    });
+    expect(pool.calls[1]?.params).toEqual([2, 'node-2', 'basement', null, -1, 1.5, 2.25]);
+
+    await queue.close();
+  });
+
   it('targets the migration 004 dedup key with ON CONFLICT DO NOTHING for csi_records and heartbeats', async () => {
     const pool = new RecordingPool();
     const queue = new DbWriteQueue(pool, { flushIntervalMs: 3_600_000 });

@@ -44,12 +44,39 @@ const macAddressSchema = z
   .string()
   .regex(/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/, 'invalid MAC address');
 
+// {x, y} in METRES, relative to an arbitrary origin the operator picks --
+// there is exactly one origin per FLOOR (e.g. a corner of that floor's own
+// plan, or one particular node on it), never one shared origin across the
+// whole house. These coordinates exist for geometry and drawing ONLY:
+// deriving a link's endpoints/midpoint/length/rooms-spanned for
+// GET /api/topology (@homecsi/api), and letting the dashboard draw a floor
+// plan. They must NEVER be used to trilaterate or otherwise estimate a
+// person's position -- ESP32 CSI phase has no hardware TX/RX lock and is
+// not corrected for CFO/SFO (docs/architecture.md "Amplitude-first"), so
+// this system cannot localise anything more precise than "which link
+// showed motion".
+const positionSchema = z.object({
+  x: z.coerce.number(),
+  y: z.coerce.number(),
+});
+
 const nodeSchema = z.object({
   id: z.coerce.number().int().min(1).max(65535),
   name: z.string().min(1),
   room: z.string().min(1),
   psk: base64Psk,
   expectedMac: macAddressSchema.optional(),
+  // Signed floor index -- a basement/garage below the operator's own
+  // "ground floor" can be -1, -2, etc. Defaults to 0 so a single-floor (or
+  // not-yet-placed) deployment never needs to think about this. Purely a
+  // grouping/drawing key on its own; `position` below is what makes it
+  // geometric.
+  floor: z.coerce.number().int().default(0),
+  // Optional: a working deployment that hasn't measured anything yet must
+  // still validate. Omitted means "not placed yet" (don't draw this node),
+  // never "at (0, 0)" -- see positionSchema's comment for the full
+  // units/origin/no-trilateration contract.
+  position: positionSchema.optional(),
 });
 
 const storageSchema = z.object({

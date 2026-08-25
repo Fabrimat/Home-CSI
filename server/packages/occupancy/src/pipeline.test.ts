@@ -32,6 +32,7 @@ function configWithNodes(nodeCount: number): Config {
       name: `node-${i + 1}`,
       room: `room-${i + 1}`,
       psk: Buffer.alloc(32).toString('base64'),
+      floor: 0,
     })),
     storage: {
       captureDir: '.',

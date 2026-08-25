@@ -238,22 +238,54 @@ export class DbWriteQueue {
   }
 
   /**
-   * Upserts a node's identity row (id/name/room/expected_mac) so it
-   * exists for the `csi_records`/`heartbeats` foreign keys and stays in
-   * sync with `config.nodes`. This is the "upsert node liveness" step
-   * from the ingest contract: liveness *timing* (last-seen, last-seq) is
-   * tracked as an in-process metric by `@homecsi/ingest`, not persisted
-   * here — see that package's `IngestMetrics.perNode`.
+   * Upserts a node's identity + placement row (id/name/room/expected_mac/
+   * floor/pos_x/pos_y) so it exists for the `csi_records`/`heartbeats`
+   * foreign keys and stays in sync with `config.nodes`. This is the
+   * "upsert node liveness" step from the ingest contract: liveness
+   * *timing* (last-seen, last-seq) is tracked as an in-process metric by
+   * `@homecsi/ingest`, not persisted here — see that package's
+   * `IngestMetrics.perNode`.
+   *
+   * DELIBERATE DESIGN DECISION -- there is NO write-back path from the
+   * dashboard (or any other API caller) to `floor`/`pos_x`/`pos_y`.
+   * `config.yaml` (gitignored, holds per-node PSKs) is the sole source of
+   * truth for placement, and this method is called with every configured
+   * node at every ingest/replay start (see @homecsi/ingest's `index.ts`
+   * and @homecsi/storage's `replay.ts`), overwriting whatever is in the
+   * database. A hypothetical "save placement" dashboard button would
+   * create split-brain state that the next ingest restart would silently
+   * revert — worse than not offering the button at all. If a future brief
+   * wants operator-editable placement, the right shape is generating a
+   * YAML snippet the operator pastes into `config.yaml`, not writing to
+   * this table directly (see migration 010's header comment).
    */
-  async upsertNode(node: { id: number; name: string; room: string; expectedMac?: string }): Promise<void> {
+  async upsertNode(node: {
+    id: number;
+    name: string;
+    room: string;
+    expectedMac?: string;
+    floor?: number;
+    position?: { x: number; y: number };
+  }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO nodes (id, name, room, expected_mac)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO nodes (id, name, room, expected_mac, floor, pos_x, pos_y)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          room = EXCLUDED.room,
-         expected_mac = EXCLUDED.expected_mac`,
-      [node.id, node.name, node.room, node.expectedMac ?? null],
+         expected_mac = EXCLUDED.expected_mac,
+         floor = EXCLUDED.floor,
+         pos_x = EXCLUDED.pos_x,
+         pos_y = EXCLUDED.pos_y`,
+      [
+        node.id,
+        node.name,
+        node.room,
+        node.expectedMac ?? null,
+        node.floor ?? 0,
+        node.position?.x ?? null,
+        node.position?.y ?? null,
+      ],
     );
   }
 

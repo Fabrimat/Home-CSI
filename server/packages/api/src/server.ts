@@ -7,12 +7,14 @@ import { extractBearerToken, tokensMatch } from './auth.js';
 import { DeviceTokenRegistry } from './deviceAuth.js';
 import type { HomeCsiDb } from './db/types.js';
 import { LiveHub } from './live/hub.js';
-import { registerCsiRoutes } from './routes/csi.js';
+import { registerAnnotationRoutes } from './routes/annotations.js';
 import {
   DEFAULT_RETENTION_MAX_AGE_MS,
   registerConfigRoutes,
   type ClientConfig,
 } from './routes/config.js';
+import { registerCoverageRoutes } from './routes/coverage.js';
+import { registerCsiRoutes } from './routes/csi.js';
 import {
   DEFAULT_OTA_FIRMWARE_DIR,
   DeviceHelloStore,
@@ -26,6 +28,7 @@ import { registerLogRoutes } from './routes/logs.js';
 import { registerNodeRoutes } from './routes/nodes.js';
 import { registerOccupancyRoutes } from './routes/occupancy.js';
 import { registerStatusRoutes } from './routes/status.js';
+import { registerTopologyRoutes } from './routes/topology.js';
 import { registerWsRoutes } from './routes/ws.js';
 import { ValidationError } from './validate.js';
 import { RingLogBuffer } from './logs/ringBuffer.js';
@@ -182,8 +185,18 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerLinkRoutes(app, options.db);
   registerCsiRoutes(app, options.db);
   registerFeatureRoutes(app, options.db);
+  registerTopologyRoutes(app, options.db);
   registerOccupancyRoutes(app, options.db);
   registerLabelRoutes(app, options.db, options.labelPreservation);
+  registerAnnotationRoutes(app, options.db);
+  // Same retentionMaxAgeMs/safetyMarginMs source of truth as GET /api/config
+  // (routes/config.ts) -- reuses the already-optional clientConfig option
+  // and its defaults rather than inventing a third way to thread these two
+  // numbers through buildApp.
+  registerCoverageRoutes(app, options.db, {
+    retentionMaxAgeMs: options.clientConfig?.retentionMaxAgeMs ?? DEFAULT_RETENTION_MAX_AGE_MS,
+    safetyMarginMs: options.clientConfig?.retentionSafetyMarginMs ?? DEFAULT_RETENTION_SAFETY_MARGIN_MS,
+  });
   registerDeviceRoutes(app, {
     firmwareDir: options.otaFirmwareDir ?? DEFAULT_OTA_FIRMWARE_DIR,
     helloStore: options.deviceHelloStore ?? new DeviceHelloStore(),

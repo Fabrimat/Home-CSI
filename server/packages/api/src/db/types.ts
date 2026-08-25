@@ -6,6 +6,12 @@
  * TimescaleDB-backed implementation used by `startServer`.
  */
 
+/** {x, y} in METRES on one floor's own operator-chosen origin -- see packages/config's `nodeSchema` for the full contract. Never used for localisation, only geometry/drawing. */
+export interface NodePosition {
+  x: number;
+  y: number;
+}
+
 export interface NodeLiveness {
   id: number;
   name: string;
@@ -16,6 +22,10 @@ export interface NodeLiveness {
   lastHeartbeatAt: string | null;
   /** ISO timestamp of the most recent CSI record attributed to this node, or null. */
   lastCsiRecordAt: string | null;
+  /** Signed floor index (basement negative); defaults to 0 (migration 010). */
+  floor: number;
+  /** Relative position on this node's floor, or `null` if not yet placed (migration 010: `pos_x`/`pos_y` are both nullable). */
+  position: NodePosition | null;
 }
 
 export interface HeartbeatRow {
@@ -136,6 +146,65 @@ export type UpdateLabelEndTimeResult =
   | { status: 'not-found' }
   | { status: 'invalid-end-time' };
 
+/**
+ * `event_annotations.category` CHECK constraint's exact admitted values
+ * (migration 009). Deliberately has NO `activity` value -- a person doing
+ * something at home is occupancy signal, not a confounder, and belongs in
+ * `labels` via `POST /api/labels/corrections` instead (see migration 009's
+ * comment header).
+ */
+export type AnnotationCategory = 'appliance' | 'door' | 'hvac' | 'pet' | 'interference' | 'other';
+
+/** `event_annotations.source` CHECK constraint (migration 009) -- 'manual' is the only value any code path writes today. */
+export type AnnotationSource = 'manual';
+
+/**
+ * A categorised, point-or-interval marker that something non-occupant
+ * happened -- a microwave, a door, the HVAC -- WITHOUT asserting an
+ * occupancy count (migration 009). Deliberately NOT a `LabelRow`: see that
+ * migration's comment header for why annotations live in their own table
+ * rather than as a `labels` variant.
+ */
+export interface AnnotationRow {
+  id: number;
+  /** ISO-8601. Interval START, or the instant for a point annotation. */
+  time: string;
+  /** ISO-8601, EXCLUSIVE end. `null` means a point annotation. */
+  endTime: string | null;
+  category: AnnotationCategory;
+  label: string | null;
+  notes: string | null;
+  source: AnnotationSource;
+  createdAt: string;
+}
+
+/**
+ * Everything `GET /api/coverage` (routes/coverage.ts) needs from one window,
+ * read in a small, fixed number of aggregate queries rather than the route
+ * re-deriving an aggregate from a row-capped listing (`listLabelsInRange`'s
+ * `limit` is sized for a per-row dashboard payload, not for an exact
+ * coverage total over a multi-day retention window).
+ */
+export interface CoverageInputs {
+  /**
+   * One entry per `labels` row whose `source` counts as a genuine human
+   * review (`manual`/`confirmed`/`training` -- excludes `weak:phone-
+   * presence`, an automated guess, not a review) that overlaps the query
+   * window, already clamped to it (`fromMs`/`toMs` are both within
+   * [window.from, window.to]). A point label clamps to a zero-width
+   * `fromMs === toMs` pair, contributing nothing to covered duration on its
+   * own but still real -- callers merge these into a coverage total, this
+   * type just carries the raw, clamped intervals.
+   */
+  reviewedIntervals: { fromMs: number; toMs: number }[];
+  /** Count of `labels` rows overlapping the window, grouped by `source` -- every source seen, not just the ones the route currently surfaces. */
+  labelSourceCounts: Partial<Record<LabelSource, number>>;
+  /** Count of `event_annotations` rows overlapping the window. */
+  annotationCount: number;
+  /** Distinct `event_annotations.category` values seen overlapping the window. */
+  annotationCategories: AnnotationCategory[];
+}
+
 export interface HomeCsiDb {
   /** Round-trips a trivial query; used for the unauthenticated liveness route too. */
   healthCheck(): Promise<boolean>;
@@ -193,7 +262,18 @@ export interface HomeCsiDb {
 
   getStatusSummary(windowMs: number): Promise<StatusSummary>;
 
-  listLabelSessions(params: { limit: number }): Promise<LabelSessionRow[]>;
+  /**
+   * Label sessions, newest `started_at` first. Both filters are optional and
+   * additive: `open` narrows to running (`true`) or stopped (`false`)
+   * sessions, `notesPrefix` to sessions whose `notes` start with that exact
+   * literal (no LIKE metacharacter semantics). Omitting both is the original
+   * "newest N sessions" behaviour.
+   *
+   * The filters exist so a caller can ask "is there an open `[training]`
+   * session?" directly rather than paging the newest N and scanning -- see
+   * `GET /api/labels/sessions`' query schema for why scanning is unsafe.
+   */
+  listLabelSessions(params: { limit: number; open?: boolean; notesPrefix?: string }): Promise<LabelSessionRow[]>;
 
   createLabelSession(params: { startedAt: Date; notes?: string }): Promise<LabelSessionRow>;
 
@@ -234,4 +314,72 @@ export interface HomeCsiDb {
    * round-trip to re-fetch the label.
    */
   updateLabelEndTime(params: { id: number; endTime: Date }): Promise<UpdateLabelEndTimeResult>;
+
+  /**
+   * Annotations across ALL categories overlapping [from, to) -- same
+   * overlap predicate as `listLabelsInRange` (migration 009's index mirrors
+   * `idx_labels_time_range` for the same reason). Ordered `time` ascending.
+   */
+  listAnnotationsInRange(params: TimeRange & { limit: number }): Promise<AnnotationRow[]>;
+
+  createAnnotation(params: {
+    time: Date;
+    /** EXCLUSIVE end of the annotated interval; omitted (or undefined) means a point annotation. */
+    endTime?: Date;
+    category: AnnotationCategory;
+    label?: string;
+    notes?: string;
+    /** Defaults to `'manual'` when omitted, matching migration 009's column default. */
+    source?: AnnotationSource;
+  }): Promise<AnnotationRow>;
+
+  /**
+   * Deletes one annotation by id. Returns whether a row actually existed to
+   * delete -- unlike `labels` (append-only by design), annotations are not
+   * part of the dataset export, so deleting one carries none of the
+   * "quietly changed the training corpus" risk that rules out delete for
+   * `labels`; a fast one-tap annotation UI needs an undo for mis-taps more
+   * than it needs an audit trail.
+   */
+  deleteAnnotation(params: { id: number }): Promise<boolean>;
+
+  /** Aggregate inputs for `GET /api/coverage` -- see `CoverageInputs`. */
+  getCoverageInputs(params: TimeRange): Promise<CoverageInputs>;
+
+  /**
+   * Per-(node, link_mac) motion summary for GET /api/topology
+   * (routes/topology.ts), aggregated in SQL over [from, to) -- `features`
+   * is a high-volume hypertable (docs/architecture.md "Data lifecycle"),
+   * so this must never degrade into pulling raw feature rows into Node to
+   * reduce there. Bounded by `limit` distinct links, same rationale as
+   * `listLinks`. See `LinkMotionSummary` for field semantics.
+   */
+  listLinkMotion(params: TimeRange & { limit: number }): Promise<LinkMotionSummary[]>;
+}
+
+/**
+ * One link's motion signal, summarised over a requested window from the
+ * REAL `feature_vector` field names `@homecsi/features` writes
+ * (packages/features/src/featureVector.ts's `LinkFeatureVector`) -- NOT
+ * renamed or reinterpreted here. `baselineDeviation` is the primary,
+ * baseline-relative motion signal (comparable across links regardless of
+ * each link's own noise floor); `baselineFrozen` is that link's own local
+ * Schmitt-triggered "is this window motion" classification (true also means
+ * the adaptive baseline was NOT updated from this window -- see
+ * baseline.ts). This is link-path motion attribution, never a person count
+ * or position (docs/architecture.md "Motion, not people", "Amplitude-first").
+ */
+export interface LinkMotionSummary {
+  /** The observing node (this link's (node_id, link_mac) key -- see @homecsi/features's CsiRecordRow doc). */
+  nodeId: number;
+  /** The transmitting peer's MAC, as captured -- may or may not resolve to a configured node (see routes/topology.ts's `peerNodeId` resolution). */
+  linkMac: string;
+  /** Mean of |feature_vector.baselineDeviation| across every window observed for this link in [from, to). */
+  meanAbsDeviation: number;
+  /** feature_vector.baselineFrozen of the most recent window in range -- this link's own local motion classification as of "now" within the window. */
+  motionActive: boolean;
+  /** Number of feature-vector windows this summary was aggregated from. */
+  sampleCount: number;
+  /** ISO timestamp of the most recent window aggregated. */
+  lastSeenAt: string;
 }

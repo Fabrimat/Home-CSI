@@ -1,0 +1,377 @@
+/*
+ * Ground-truth view (views/groundTruth.ts). Own file, imported by that view
+ * module -- style.css stays the shared baseline (panels, .controls, .stat,
+ * .correction-message, the global :focus-visible ring), and everything here
+ * only adds what a walking-around-the-house, one-thumb surface needs on top
+ * of it: big targets, obvious state, no hover-only affordances.
+ *
+ * Deliberately no rules that hide a focus ring: every control here is
+ * keyboard-reachable and style.css's `button:focus-visible` /
+ * `input:focus-visible` outline must keep applying.
+ */
+
+.gt-title {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- Mode switcher: a real fieldset + radio group ---------------------- */
+
+.gt-modes {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  padding: 0.6rem 0.7rem 0.7rem;
+  margin: 0 0 1rem;
+}
+
+.gt-modes legend {
+  color: var(--text-dim);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 0.3rem;
+}
+
+.gt-mode {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  flex: 1 1 8rem;
+  /* 44px+ tall: hittable with a thumb while walking. */
+  min-height: 3rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+  cursor: pointer;
+}
+
+/* The radio itself stays in the accessibility tree and stays focusable --
+   it is just small, because the whole label is the target. */
+.gt-mode input[type='radio'] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.gt-mode-label {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.gt-mode-hint {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+}
+
+.gt-mode:has(input:checked) {
+  border-color: var(--accent);
+  background: rgba(93, 200, 250, 0.12);
+}
+
+.gt-mode:has(input:checked) .gt-mode-label {
+  color: var(--accent);
+}
+
+/* The radio is visually hidden, so its own focus ring is invisible: the ring
+   has to be drawn on the label instead, or keyboard focus in this group would
+   have no indicator at all. */
+.gt-mode:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- Live mode: the big state buttons ---------------------------------- */
+
+.gt-declare-row {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.gt-declare {
+  flex: 1;
+  min-width: 5rem;
+  min-height: 6rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  padding: 1rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-panel-raised);
+  color: var(--text);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.gt-declare:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.gt-declare:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gt-declare.active {
+  border-color: var(--ok);
+  color: var(--ok);
+  background: rgba(61, 220, 151, 0.1);
+}
+
+.gt-declare-digit {
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: 1;
+  font-family: var(--mono);
+}
+
+.gt-declare-text {
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.gt-motion.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.gt-readout {
+  margin: 0.5rem 0;
+}
+
+.gt-readout-state {
+  font-size: 1.8rem;
+  font-weight: 700;
+}
+
+.gt-readout-duration {
+  font-size: 1rem;
+}
+
+/* ---- Annotate mode: the event palette --------------------------------- */
+
+.gt-cat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+.gt-cat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  min-height: 4rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-panel-raised);
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gt-cat:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.gt-cat:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* An interval is open on this category: it is now the "tap again to stop"
+   button, and must not look like the five disabled ones next to it. */
+.gt-cat.pending {
+  border-color: var(--warn);
+  background: rgba(245, 196, 81, 0.12);
+  opacity: 1;
+}
+
+.gt-cat-label {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.gt-cat-hint {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+}
+
+.gt-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.gt-chip {
+  min-height: 2.2rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel-raised);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.gt-chip:hover {
+  border-color: var(--accent);
+}
+
+/* A checkbox and its text on one line -- `.controls label` stacks its
+   contents in a column, which is right for "caption above field" and wrong
+   for a checkbox. */
+.gt-inline-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem !important;
+  color: var(--text) !important;
+  min-height: 2.75rem;
+}
+
+.gt-pending {
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: rgba(245, 196, 81, 0.08);
+  color: var(--warn);
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.gt-pending .controls {
+  margin-bottom: 0;
+}
+
+/* Undo has to be findable without hunting: same visual weight as the
+   palette it corrects, never a small text link. */
+.gt-undo {
+  min-height: 2.75rem;
+  min-width: 9rem;
+  font-weight: 600;
+}
+
+.gt-feedback:empty {
+  display: none;
+}
+
+.gt-handoff {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+/* ---- Missions --------------------------------------------------------- */
+
+.gt-coverage {
+  margin-bottom: 0.75rem;
+}
+
+.gt-progress {
+  width: 100%;
+  height: 0.9rem;
+  margin-top: 0.3rem;
+  accent-color: var(--ok);
+}
+
+.gt-diversity {
+  margin-bottom: 1rem;
+}
+
+.gt-missions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.gt-mission {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--warn);
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+  padding: 0.6rem 0.75rem;
+}
+
+.gt-mission.urgent {
+  border-left-color: var(--bad);
+}
+
+.gt-mission-when {
+  flex: 1 1 14rem;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+
+.gt-mission-deadline {
+  color: var(--warn);
+  font-weight: 600;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.gt-mission-deadline.urgent {
+  color: var(--bad);
+}
+
+.gt-go {
+  min-width: 4.5rem;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #001018;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.gt-go:hover {
+  background: var(--text);
+}
+
+@media (max-width: 640px) {
+  /* One column of full-width targets on a phone: this is the mode the
+     operator actually uses mid-walk. */
+  .gt-cat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .gt-declare {
+    min-height: 5rem;
+  }
+
+  .gt-mission {
+    align-items: stretch;
+  }
+
+  .gt-go {
+    flex: 1;
+  }
+}

@@ -97,7 +97,7 @@ export interface LabelCliDeps {
 
 /**
  * Marker prefix a training-mode `label_sessions.notes` row starts with —
- * mirrors `web/ui/src/views/training.ts`'s `TRAINING_MARKER` exactly
+ * mirrors `web/ui/src/groundTruthLogic.ts`'s `TRAINING_MARKER` exactly
  * (brief B14). Kept as a separate constant here (not imported, since
  * `@homecsi/labeling` cannot depend on `@homecsi/web`'s UI package) —
  * if that string ever changes, this one must be updated to match.
