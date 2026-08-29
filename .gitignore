@@ -52,3 +52,6 @@ ui-dist/
 ops/config.yaml
 ops/config*.yaml
 !ops/config*.example.yaml
+
+# Claude Code per-machine settings: holds a deployment-host ssh alias.
+.claude/settings.local.json

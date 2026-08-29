@@ -44,19 +44,19 @@ Fill this in per board as you go, then copy the results into
 
 | Fact | How you find it | Node 1 | Node 2 | Node 3 | Node 4 |
 |---|---|---|---|---|---|
-| Serial bridge chip (VID:PID) | Step 2 | | | | |
-| Driver installed (name/version) | Step 2 | | | | |
-| COM port | Device Manager | | | | |
-| Chip type + revision | `esptool.py chip_id` | | | | |
-| Module variant (WROOM-32 / WROVER / ...) | markings + `chip_id` features | | | | |
-| Base MAC | `esptool.py chip_id` | | | | |
-| STA MAC (for the allowlist) | csi-hello prints it | | | | |
-| Flash size (real) | `esptool.py flash_id` | | | | |
-| Flash manufacturer / device id | `esptool.py flash_id` | | | | |
-| PSRAM present? | `chip_id` features line | | | | |
-| Stock backup file + SHA-256 | Step 4 | | | | |
-| CSI `len` values observed | Step 6 | | | | |
-| CSI callbacks/sec observed | Step 6 | | | | |
+| Serial bridge chip (VID:PID) | Step 2 | `1A86:7523` (WCH CH340) | `1A86:7523` (WCH CH340) — identical board | | |
+| Driver installed (name/version) | Step 2 | WCH `CH341SER_M64` (ARM64) — status OK | same driver, no reinstall needed | | |
+| COM port | Device Manager | COM3 | COM3 (same port — node 1 unplugged first) | | |
+| Chip type + revision | `esptool.py chip_id` | ESP32-D0WDQ6, revision v1.0 | ESP32-D0WDQ6, revision v1.0 | | |
+| Module variant (WROOM-32 / WROVER / ...) | markings + `chip_id` features | Dual core + 240 MHz, 40 MHz xtal, no PSRAM → WROOM-class | same | | |
+| Base MAC | `esptool.py chip_id` | `3c:61:05:xx:xx:xx` (full value in `tools/nodes.json`, gitignored) | `3c:61:05:xx:xx:xx` (same OUI, different suffix; full value in `tools/nodes.json`) | | |
+| STA MAC (for the allowlist) | csi-hello prints it | same as base MAC | same as base MAC | | |
+| Flash size (real) | `esptool.py flash_id` | **4 MB** — satisfies `partitions.csv` | **4 MB** — satisfies `partitions.csv` | | |
+| Flash manufacturer / device id | `esptool.py flash_id` | `c8` (GigaDevice) / `6016` | `c8` (GigaDevice) / `6016` | | |
+| PSRAM present? | `chip_id` features line | No | No | | |
+| Stock backup file + SHA-256 | Step 4 | `backups/halocode-stock-node1-4MB.bin`, 4194304 B, `dc2c4a51…2936297d` | not taken — same board/flash part, so node 1's image is the restore path | | |
+| CSI `len` values observed | Step 6 | 128, 256, 384 (max 384 = the `CONFIG_HCS_CSI_MAX_LEN` default) | not measured — flashed straight to `esp32-csi-node`, skipping csi-hello | | |
+| CSI callbacks/sec observed | Step 6 | ~10/s associated (~0.4/s unassociated, sniffing only) | ~13/s seen, ~10/s kept after the rate budget (heartbeat counters) | | |
 | LED GPIO (if you determine it) | Step 8 (optional) | | | | |
 
 Two of these matter beyond curiosity:
