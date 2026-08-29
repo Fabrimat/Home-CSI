@@ -1,6 +1,14 @@
 import { apiGet, ApiError } from '../api.js';
 import { clear, formatTimestamp, h } from '../dom.js';
 import { emptyState, errorState, loadingState } from '../components/asyncState.js';
+import { describeDomain, seriesDomain, type TimeDomain } from '../featureScale.js';
+import {
+  EMPTY_NODE_DIRECTORY,
+  linkOptionText,
+  loadNodeDirectory,
+  sortByRecency,
+  type NodeDirectory,
+} from '../nodeNames.js';
 
 interface LinkSummary {
   nodeId: number;
@@ -21,8 +29,20 @@ interface FeatureRow {
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CHART_WIDTH = 460;
 const CHART_HEIGHT = 140;
-const MARGIN = { top: 10, right: 10, bottom: 20, left: 44 };
+const MARGIN = { top: 10, right: 10, bottom: 26, left: 44 };
 const RANGE_MS = 30 * 60 * 1000;
+
+/**
+ * How often the charts re-fetch while Live is on. The feature pipeline runs
+ * on a 60s loop (`pipeline` service, ops/docker-compose*.yml), so anything
+ * much faster than this just re-reads the same rows; anything slower makes
+ * the view feel dead during bring-up, which is when it is watched most.
+ * There is no `features` WebSocket channel to subscribe to (ws.ts carries
+ * csi/occupancy/heartbeat only), so polling is the honest mechanism here.
+ */
+const REFRESH_MS = 15_000;
+/** The link list changes far more slowly than the data on one link. */
+const LINK_REFRESH_MS = 60_000;
 
 const BASELINE_SUFFIX_RE = /[_-]?baseline$/i;
 
@@ -74,15 +94,17 @@ function buildSeries(rows: FeatureRow[]): Series[] {
   return [...series.values()].filter((s) => s.valuePoints.length > 0 || s.baselinePoints.length > 0);
 }
 
-function renderSeriesChart(series: Series, from: Date, to: Date): HTMLElement {
+function renderSeriesChart(series: Series, domain: TimeDomain): HTMLElement {
   const allValues = [...series.valuePoints, ...series.baselinePoints].map((p) => p.value);
   const lo = Math.min(...allValues);
   const hi = Math.max(...allValues);
   const span = hi - lo || 1;
 
   const x = (t: string): number => {
-    const spanMs = to.getTime() - from.getTime() || 1;
-    return MARGIN.left + ((new Date(t).getTime() - from.getTime()) / spanMs) * (CHART_WIDTH - MARGIN.left - MARGIN.right);
+    const spanMs = domain.toMs - domain.fromMs || 1;
+    return (
+      MARGIN.left + ((new Date(t).getTime() - domain.fromMs) / spanMs) * (CHART_WIDTH - MARGIN.left - MARGIN.right)
+    );
   };
   const y = (v: number): number => {
     const usable = CHART_HEIGHT - MARGIN.top - MARGIN.bottom;
@@ -97,6 +119,18 @@ function renderSeriesChart(series: Series, from: Date, to: Date): HTMLElement {
     text.textContent = (label as number).toFixed(2);
     svg.append(text);
   }
+
+  // X axis endpoints. The domain is fitted to the data (see featureScale.ts),
+  // so without these two labels the reader has no way to tell whether they
+  // are looking at thirty seconds or thirty minutes.
+  const axisY = CHART_HEIGHT - MARGIN.bottom + 12;
+  const timeText = (ms: number): string =>
+    new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const startLabel = svgEl('text', { x: MARGIN.left, y: axisY, fill: '#93a0b8', 'font-size': 9, 'text-anchor': 'start' });
+  startLabel.textContent = timeText(domain.fromMs);
+  const endLabel = svgEl('text', { x: CHART_WIDTH - MARGIN.right, y: axisY, fill: '#93a0b8', 'font-size': 9, 'text-anchor': 'end' });
+  endLabel.textContent = timeText(domain.toMs);
+  svg.append(startLabel, endLabel);
 
   function path(points: Array<{ time: string; value: number }>): string {
     return points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(p.time)} ${y(p.value)}`).join(' ');
@@ -126,11 +160,31 @@ export function renderFeatures(container: HTMLElement): () => void {
   container.append(root);
 
   const linkSelect = h('select', { 'aria-label': 'Link' }) as HTMLSelectElement;
+  const liveToggle = h('input', { type: 'checkbox', checked: true }) as HTMLInputElement;
+  const status = h('span', { class: 'sub' }, '');
   const chartArea = h('div', { class: 'grid' });
-  root.append(h('div', { class: 'controls' }, h('label', {}, 'Link', linkSelect)), chartArea);
+  root.append(
+    h(
+      'div',
+      { class: 'controls' },
+      h('label', {}, 'Link', linkSelect),
+      h('label', {}, h('span', {}, 'Live'), liveToggle),
+      status,
+    ),
+    chartArea,
+  );
   chartArea.append(loadingState('Loading available links…'));
 
   let links: LinkSummary[] = [];
+  let directory: NodeDirectory = EMPTY_NODE_DIRECTORY;
+  let dataTimer: ReturnType<typeof setInterval> | null = null;
+  let linkTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Signature of what is currently drawn. A poll that returns the same rows
+   * must not rebuild the DOM: it would flicker every 15s and reset the
+   * scroll position of a long feature list for no gain.
+   */
+  let renderedSignature = '';
 
   function linkKey(l: LinkSummary): string {
     return `${l.nodeId}:${l.srcMac}`;
@@ -138,8 +192,9 @@ export function renderFeatures(container: HTMLElement): () => void {
 
   async function load(): Promise<void> {
     const selected = links.find((l) => linkKey(l) === linkSelect.value);
-    clear(chartArea);
     if (!selected) {
+      renderedSignature = '';
+      clear(chartArea);
       chartArea.append(emptyState('Select a link above to inspect its feature vector.'));
       return;
     }
@@ -153,17 +208,31 @@ export function renderFeatures(container: HTMLElement): () => void {
       );
       rows = res.features;
     } catch (err) {
+      if (disposed) return;
+      renderedSignature = '';
+      clear(chartArea);
       chartArea.append(errorState(err instanceof ApiError ? err.message : String(err)));
       return;
     }
 
     if (disposed) return;
+
+    const signature = `${linkSelect.value}|${rows.length}|${rows[rows.length - 1]?.time ?? ''}`;
+    if (signature === renderedSignature) {
+      // Same data as last time. Only the "last updated" clock moves.
+      status.textContent = `checked ${new Date().toLocaleTimeString()} · no new windows`;
+      return;
+    }
+    renderedSignature = signature;
+
+    clear(chartArea);
     if (rows.length === 0) {
       chartArea.append(
         emptyState(
-          'No features rows for this link/window — the feature pipeline (brief B4) has not produced output yet, or this link genuinely has no recent data. Honest empty state, not a placeholder chart.',
+          'No features rows for this link/window — the feature pipeline has not produced output for it yet, or this link genuinely has no recent data. Honest empty state, not a placeholder chart.',
         ),
       );
+      status.textContent = `checked ${new Date().toLocaleTimeString()}`;
       return;
     }
 
@@ -174,38 +243,93 @@ export function renderFeatures(container: HTMLElement): () => void {
       );
       return;
     }
-    for (const s of series) chartArea.append(renderSeriesChart(s, from, to));
-    chartArea.append(h('p', { class: 'sub' }, `${rows.length} feature windows over the last ${Math.round(RANGE_MS / 60000)} minutes, last sample at ${formatTimestamp(rows[rows.length - 1]!.time)}.`));
+
+    // Fitted to the rows that came back, NOT to the 30-minute window they
+    // were requested over -- see featureScale.ts for why.
+    const domain = seriesDomain(rows, to.getTime());
+    for (const s of series) chartArea.append(renderSeriesChart(s, domain));
+    chartArea.append(
+      h(
+        'p',
+        { class: 'sub' },
+        `${rows.length} feature windows on screen, x axis fitted to the data: ${describeDomain(domain)}. Requested window was the last ${Math.round(RANGE_MS / 60000)} minutes; last sample at ${formatTimestamp(rows[rows.length - 1]!.time)}.`,
+      ),
+    );
+    status.textContent = `updated ${new Date().toLocaleTimeString()}`;
   }
 
-  async function loadLinks(): Promise<void> {
+  /** Rebuilds the picker, preserving the current choice, ordered most-recently-heard first. */
+  function renderLinkOptions(): void {
+    const previous = linkSelect.value;
+    clear(linkSelect);
+    if (links.length === 0) {
+      linkSelect.append(h('option', { value: '' }, 'no links observed recently'));
+      return;
+    }
+    linkSelect.append(
+      h('option', { value: '' }, 'select a link…'),
+      ...links.map((l) => h('option', { value: linkKey(l) }, linkOptionText(directory, l, false))),
+    );
+    // Only restore a selection that still exists; otherwise the picker would
+    // show a value the option list no longer contains.
+    if (previous && links.some((l) => linkKey(l) === previous)) linkSelect.value = previous;
+  }
+
+  async function loadLinks(initial: boolean): Promise<void> {
     try {
       const res = await apiGet<{ links: LinkSummary[] }>('/api/links?sinceMs=3600000&limit=500');
-      links = res.links;
+      links = sortByRecency(res.links);
     } catch (err) {
-      if (disposed) return;
+      if (disposed || !initial) return;
       clear(chartArea);
       chartArea.append(errorState(err instanceof ApiError ? err.message : String(err)));
       return;
     }
     if (disposed) return;
-    clear(linkSelect);
-    if (links.length === 0) {
-      linkSelect.append(h('option', { value: '' }, 'no links observed recently'));
-    } else {
-      linkSelect.append(h('option', { value: '' }, 'select a link…'), ...links.map((l) => h('option', { value: linkKey(l) }, `node ${l.nodeId}: ${l.srcMac}`)));
-    }
-    // Either branch leaves chartArea showing the "Loading available links…"
-    // placeholder from mount time until this runs -- replace it with the
-    // real prompt (or the empty-links message) rather than leaving a stale
-    // loading state up once links.length > 0 and no link is selected yet.
-    void load();
+    renderLinkOptions();
+    if (initial) void load();
   }
 
-  linkSelect.addEventListener('change', () => void load());
-  void loadLinks();
+  function startPolling(): void {
+    stopPolling();
+    dataTimer = setInterval(() => void load(), REFRESH_MS);
+    linkTimer = setInterval(() => void loadLinks(false), LINK_REFRESH_MS);
+  }
+
+  function stopPolling(): void {
+    if (dataTimer) clearInterval(dataTimer);
+    if (linkTimer) clearInterval(linkTimer);
+    dataTimer = null;
+    linkTimer = null;
+  }
+
+  linkSelect.addEventListener('change', () => {
+    // Force a redraw even if the new link happens to produce the same row
+    // count as the old one.
+    renderedSignature = '';
+    void load();
+  });
+
+  liveToggle.addEventListener('change', () => {
+    if (liveToggle.checked) {
+      startPolling();
+      void load();
+    } else {
+      stopPolling();
+      status.textContent = 'live off';
+    }
+  });
+
+  void (async (): Promise<void> => {
+    directory = await loadNodeDirectory();
+    if (disposed) return;
+    await loadLinks(true);
+    if (disposed) return;
+    if (liveToggle.checked) startPolling();
+  })();
 
   return () => {
     disposed = true;
+    stopPolling();
   };
 }

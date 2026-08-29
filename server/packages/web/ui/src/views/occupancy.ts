@@ -2,6 +2,7 @@ import { apiGet, apiPost, ApiError } from '../api.js';
 import { clear, formatTimestamp, h } from '../dom.js';
 import { emptyState, errorState, loadingState } from '../components/asyncState.js';
 import { statusMessage } from '../components/statusMessage.js';
+import { liveSocket, type LiveDataMessage } from '../ws.js';
 import {
   buildStepSegments,
   currentRunStartMs,
@@ -59,11 +60,35 @@ const PAST_DEADLINE_PATTERN_ID = 'occ-past-deadline-hatch';
 const RETENTION_UNAVAILABLE_PATTERN_ID = 'occ-retention-unavailable-hatch';
 
 const RANGE_PRESETS: Array<{ label: string; ms: number }> = [
+  { label: '15m', ms: 15 * 60_000 },
   { label: '1h', ms: 3600_000 },
   { label: '6h', ms: 6 * 3600_000 },
   { label: '24h', ms: 24 * 3600_000 },
   { label: '7d', ms: 7 * 24 * 3600_000 },
 ];
+
+/**
+ * `rangeSelect` value meaning "fit the chart to however much history exists"
+ * rather than to a fixed lookback. A fixed lookback is the wrong default
+ * while the pipeline is young: 20 minutes of events drawn against a 24-hour
+ * axis is a flat line in the right-hand 1.5% of the chart, which reads as a
+ * broken chart rather than as "this is all there is".
+ */
+const AUTO_RANGE = 'auto';
+/** How far back auto-fit looks before giving up -- the retention window, so it can never ask for history that cannot exist. */
+const AUTO_LOOKBACK_MS = 7 * 24 * 3600_000;
+/** Auto-fit never draws a window narrower than this, so a single event does not get a degenerate axis. */
+const AUTO_MIN_SPAN_MS = 2 * 60_000;
+/** Left-hand padding as a fraction of the span, so the first event is not welded to the axis. */
+const AUTO_PAD_FRACTION = 0.02;
+
+/**
+ * Poll cadence while Live is on. The occupancy WebSocket channel pushes new
+ * rows as they are written, which covers transitions; this timer exists for
+ * the other half of "live" -- the right-hand edge of the chart is `now`, and
+ * `now` keeps moving even when nothing happens.
+ */
+const LIVE_REFRESH_MS = 15_000;
 
 const STATE_COLORS: Record<string, string> = {
   unoccupied: '#93a0b8',
@@ -151,10 +176,24 @@ export function renderOccupancy(container: HTMLElement): () => void {
   let selection: Selection | null = null;
   let applySelectionToChart: ((sel: Selection | null) => void) | null = null;
   let lastResult: { kind: 'ok' | 'warn' | 'error'; text: string } | null = null;
+  /**
+   * True between pointerdown and pointerup on the chart. A live refresh
+   * rebuilds the whole SVG, which would yank the element out from under an
+   * in-progress drag and lose the selection the operator is mid-way through
+   * making -- so refreshes are skipped, not queued, while this is set.
+   */
+  let isDragging = false;
 
   const rangeSelect = h('select', { 'aria-label': 'Time range', disabled: true }) as HTMLSelectElement;
+  rangeSelect.append(h('option', { value: AUTO_RANGE }, 'auto (fit to data)'));
   for (const preset of RANGE_PRESETS) rangeSelect.append(h('option', { value: String(preset.ms) }, `last ${preset.label}`));
-  rangeSelect.value = String(RANGE_PRESETS[2]!.ms);
+  // Auto is the default: on a deployment whose pipeline started an hour ago,
+  // any fixed preset is either far too wide or arbitrarily too narrow, and
+  // the operator should not have to guess which before seeing anything.
+  rangeSelect.value = AUTO_RANGE;
+
+  const liveToggle = h('input', { type: 'checkbox', checked: true }) as HTMLInputElement;
+  const liveStatus = h('span', { class: 'sub' }, '');
 
   // Session filter for the label lane -- folds the old "pick one session to
   // overlay" control into a filter over the cross-session `GET /api/labels`
@@ -192,7 +231,14 @@ export function renderOccupancy(container: HTMLElement): () => void {
   );
 
   root.append(
-    h('div', { class: 'controls' }, h('label', {}, 'Range', rangeSelect), h('label', {}, 'Ground truth', sessionSelect)),
+    h(
+      'div',
+      { class: 'controls' },
+      h('label', {}, 'Range', rangeSelect),
+      h('label', {}, 'Ground truth', sessionSelect),
+      h('label', {}, h('span', {}, 'Live'), liveToggle),
+      liveStatus,
+    ),
     chartArea,
     selectionPanel,
   );
@@ -426,8 +472,32 @@ export function renderOccupancy(container: HTMLElement): () => void {
     }
   }
 
+  /**
+   * The window to draw, given the rows that came back.
+   *
+   * For a fixed preset this is just the requested window. For auto-fit it is
+   * [first event ever seen, now]: the right edge must stay at `now` because
+   * an occupancy state holds until the next event, so "now" is part of the
+   * information -- but the left edge follows the data instead of a lookback
+   * the operator did not choose.
+   */
+  function displayWindow(states: OccupancyRow[], fetchedFrom: Date, fetchedTo: Date): { from: Date; to: Date } {
+    if (rangeSelect.value !== AUTO_RANGE) return { from: fetchedFrom, to: fetchedTo };
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const row of states) {
+      const t = new Date(row.time).getTime();
+      if (Number.isFinite(t) && t < earliest) earliest = t;
+    }
+    if (!Number.isFinite(earliest)) return { from: fetchedFrom, to: fetchedTo };
+    const toMs = fetchedTo.getTime();
+    let fromMs = Math.min(earliest, toMs - AUTO_MIN_SPAN_MS);
+    fromMs -= (toMs - fromMs) * AUTO_PAD_FRACTION;
+    return { from: new Date(fromMs), to: fetchedTo };
+  }
+
   async function load(): Promise<void> {
-    const rangeMs = Number(rangeSelect.value);
+    const isAuto = rangeSelect.value === AUTO_RANGE;
+    const rangeMs = isAuto ? AUTO_LOOKBACK_MS : Number(rangeSelect.value);
     const to = new Date();
     const from = new Date(to.getTime() - rangeMs);
 
@@ -473,13 +543,28 @@ export function renderOccupancy(container: HTMLElement): () => void {
     }
 
     chartArea.append(currentStateCaption(states));
-    const { el, applySelection, segments } = renderChart(states, labels, from, to);
+    // Not named `window`: shadowing the global in browser code is a trap
+    // for whoever edits this next.
+    const shown = displayWindow(states, from, to);
+    const { el, applySelection, segments } = renderChart(states, labels, shown.from, shown.to);
     currentSegments = segments;
     applySelectionToChart = applySelection;
     chartArea.append(el);
+    if (isAuto) {
+      chartArea.append(
+        h(
+          'p',
+          { class: 'sub' },
+          `Auto-fit: showing ${formatDuration(shown.to.getTime() - shown.from.getTime())} of history, from the first recorded event to now. Pick a fixed range above to compare against a window you choose instead.`,
+        ),
+      );
+    }
     chartArea.append(legend());
     applySelectionToChart(selection);
     renderCorrectionPanel();
+    liveStatus.textContent = liveToggle.checked
+      ? `updated ${new Date().toLocaleTimeString()}`
+      : 'live off';
   }
 
   function xScale(t: number, from: Date, to: Date): number {
@@ -849,6 +934,7 @@ export function renderOccupancy(container: HTMLElement): () => void {
       dragAnchorClientX = pe.clientX;
       dragAnchorMs = timeFromClientX(svg, pe.clientX, from, to);
       dragMoved = false;
+      isDragging = true;
       setSelection({ fromMs: dragAnchorMs, toMs: dragAnchorMs });
     });
     svg.addEventListener('pointermove', (ev) => {
@@ -863,6 +949,7 @@ export function renderOccupancy(container: HTMLElement): () => void {
       svg.releasePointerCapture(pe.pointerId);
       if (!dragMoved) setSelection(null);
       dragAnchorClientX = null;
+      isDragging = false;
     });
 
     const wrap = h('div', {});
@@ -893,6 +980,51 @@ export function renderOccupancy(container: HTMLElement): () => void {
     );
   }
 
+  // --- Live refresh ----------------------------------------------------------
+  // Two mechanisms, because "live" here means two different things. The
+  // WebSocket delivers new occupancy_states rows the moment the pipeline
+  // writes them, which is what makes a transition appear without waiting.
+  // The timer covers the rest: the chart's right-hand edge is `now`, and a
+  // state that has held for ten minutes is itself information that only
+  // becomes visible if the axis keeps moving.
+  let liveTimer: ReturnType<typeof setInterval> | null = null;
+  let unsubscribeLive: (() => void) | null = null;
+  let unsubscribeData: (() => void) | null = null;
+
+  function refresh(): void {
+    if (disposed || isDragging || !liveToggle.checked) return;
+    void load();
+  }
+
+  function startLive(): void {
+    stopLive();
+    liveTimer = setInterval(refresh, LIVE_REFRESH_MS);
+    unsubscribeData = liveSocket.onData((msg: LiveDataMessage) => {
+      if (msg.channel !== 'occupancy') return;
+      refresh();
+    });
+    unsubscribeLive = liveSocket.subscribe({ channel: 'occupancy' });
+  }
+
+  function stopLive(): void {
+    if (liveTimer) clearInterval(liveTimer);
+    liveTimer = null;
+    unsubscribeData?.();
+    unsubscribeData = null;
+    unsubscribeLive?.();
+    unsubscribeLive = null;
+  }
+
+  liveToggle.addEventListener('change', () => {
+    if (liveToggle.checked) {
+      startLive();
+      void load();
+    } else {
+      stopLive();
+      liveStatus.textContent = 'live off';
+    }
+  });
+
   rangeSelect.addEventListener('change', () => void load());
   sessionSelect.addEventListener('change', () => void load());
 
@@ -909,11 +1041,14 @@ export function renderOccupancy(container: HTMLElement): () => void {
     rangeSelect.disabled = false;
     sessionSelect.disabled = false;
     await load();
+    if (disposed) return;
+    if (liveToggle.checked) startLive();
   }
 
   void init();
 
   return () => {
     disposed = true;
+    stopLive();
   };
 }

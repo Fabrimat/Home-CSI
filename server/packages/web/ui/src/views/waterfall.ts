@@ -3,6 +3,13 @@ import { clear, h } from '../dom.js';
 import { emptyState, errorState, loadingState } from '../components/asyncState.js';
 import { viridis } from '../colormap.js';
 import { liveSocket, type LiveDataMessage } from '../ws.js';
+import {
+  EMPTY_NODE_DIRECTORY,
+  linkOptionText,
+  loadNodeDirectory,
+  sortByRecency,
+  type NodeDirectory,
+} from '../nodeNames.js';
 
 interface LinkSummary {
   nodeId: number;
@@ -21,16 +28,19 @@ interface CsiPoint {
 }
 
 const MAX_COLUMNS = 400;
+/**
+ * How often the link picker is rebuilt. Only the list refreshes on this
+ * timer -- the selected link's own data arrives over the WebSocket, so this
+ * is purely "has a node started (or stopped) transmitting since I opened
+ * this page", which moves on the scale of node reboots, not packets.
+ */
+const LINK_REFRESH_MS = 60_000;
 const HISTORY_WINDOW_MS = 2 * 60 * 1000;
 const DISPLAY_WIDTH = 900;
 const DISPLAY_HEIGHT = 320;
 
 function linkKey(l: LinkSummary): string {
   return `${l.nodeId}:${l.srcMac}:${l.dstMac}`;
-}
-
-function linkLabel(l: LinkSummary): string {
-  return `node ${l.nodeId}: ${l.srcMac} → ${l.dstMac}`;
 }
 
 /** 5th/95th percentile clip so a single outlier reading doesn't wash out the whole colour range. */
@@ -73,6 +83,8 @@ export function renderWaterfall(container: HTMLElement): () => void {
   chartArea.append(loadingState('Loading available links…'));
 
   let links: LinkSummary[] = [];
+  let directory: NodeDirectory = EMPTY_NODE_DIRECTORY;
+  let linkTimer: ReturnType<typeof setInterval> | null = null;
   let columns: CsiPoint[] = [];
   let unsubscribeLive: (() => void) | null = null;
   let unsubscribeData: (() => void) | null = null;
@@ -211,27 +223,41 @@ export function renderWaterfall(container: HTMLElement): () => void {
     unsubscribeLive = liveSocket.subscribe({ channel: 'csi', nodeId: link.nodeId, srcMac: link.srcMac, dstMac: link.dstMac });
   }
 
-  async function loadLinks(): Promise<void> {
+  /**
+   * Rebuilds the picker most-recently-heard first, preserving whatever the
+   * operator had selected. Re-selecting for them would be worse than a
+   * stale-looking list: the waterfall is a live stream, and silently
+   * switching which link it shows mid-observation loses their place.
+   */
+  function renderLinkOptions(): void {
+    const previous = linkSelect.value;
+    clear(linkSelect);
+    if (links.length === 0) {
+      linkSelect.append(h('option', { value: '' }, 'no links observed recently'));
+      return;
+    }
+    linkSelect.append(
+      h('option', { value: '' }, 'select a link…'),
+      ...links.map((l) => h('option', { value: linkKey(l) }, linkOptionText(directory, l))),
+    );
+    if (previous && links.some((l) => linkKey(l) === previous)) linkSelect.value = previous;
+  }
+
+  async function loadLinks(initial: boolean): Promise<void> {
     try {
       const res = await apiGet<{ links: LinkSummary[] }>('/api/links?sinceMs=3600000&limit=500');
-      links = res.links;
+      links = sortByRecency(res.links);
     } catch (err) {
-      if (disposed) return;
+      // A failed refresh leaves the existing picker alone; only the very
+      // first load has nothing to fall back to and must surface the error.
+      if (disposed || !initial) return;
       clear(chartArea);
       chartArea.append(errorState(err instanceof ApiError ? err.message : String(err)));
       return;
     }
     if (disposed) return;
-    clear(linkSelect);
-    if (links.length === 0) {
-      linkSelect.append(h('option', { value: '' }, 'no links observed recently'));
-    } else {
-      linkSelect.append(
-        h('option', { value: '' }, 'select a link…'),
-        ...links.map((l) => h('option', { value: linkKey(l) }, linkLabel(l))),
-      );
-    }
-    renderChart();
+    renderLinkOptions();
+    if (initial) renderChart();
   }
 
   linkSelect.addEventListener('change', () => {
@@ -245,10 +271,17 @@ export function renderWaterfall(container: HTMLElement): () => void {
     if (link) void loadHistoryAndSubscribe(link);
   });
 
-  void loadLinks();
+  void (async (): Promise<void> => {
+    directory = await loadNodeDirectory();
+    if (disposed) return;
+    await loadLinks(true);
+    if (disposed) return;
+    linkTimer = setInterval(() => void loadLinks(false), LINK_REFRESH_MS);
+  })();
 
   return () => {
     disposed = true;
+    if (linkTimer) clearInterval(linkTimer);
     unsubscribeLive?.();
     unsubscribeData?.();
   };
