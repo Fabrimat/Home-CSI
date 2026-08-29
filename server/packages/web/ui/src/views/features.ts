@@ -111,7 +111,18 @@ function renderSeriesChart(series: Series, domain: TimeDomain): HTMLElement {
     return MARGIN.top + usable - ((v - lo) / span) * usable;
   };
 
-  const svg = svgEl('svg', { viewBox: `0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`, width: CHART_WIDTH, height: CHART_HEIGHT, role: 'img', 'aria-label': `${series.baseKey} over time` });
+  // No `width`/`height` attributes: those are an INTRINSIC size an SVG will
+  // not shrink below, so a 460px chart dropped into a narrower grid column
+  // simply overflows it and paints over its neighbour. The viewBox plus
+  // `.chart-svg` (style.css) makes it scale to whatever column it gets,
+  // deriving its height from the aspect ratio.
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`,
+    preserveAspectRatio: 'xMidYMid meet',
+    class: 'chart-svg',
+    role: 'img',
+    'aria-label': `${series.baseKey} over time`,
+  });
 
   for (const [frac, label] of [[0, hi], [1, lo]] as const) {
     const yy = MARGIN.top + frac * (CHART_HEIGHT - MARGIN.top - MARGIN.bottom);
@@ -162,7 +173,14 @@ export function renderFeatures(container: HTMLElement): () => void {
   const linkSelect = h('select', { 'aria-label': 'Link' }) as HTMLSelectElement;
   const liveToggle = h('input', { type: 'checkbox', checked: true }) as HTMLInputElement;
   const status = h('span', { class: 'sub' }, '');
-  const chartArea = h('div', { class: 'grid' });
+  // Three separate regions, because they are laid out differently: only the
+  // charts belong in a grid. Putting a loading/empty/error message or the
+  // summary caption in there too made each one a grid ITEM, squeezed into a
+  // single narrow column next to the charts instead of running the width of
+  // the view.
+  const noticeArea = h('div', {});
+  const chartArea = h('div', { class: 'chart-grid' });
+  const summaryArea = h('div', {});
   root.append(
     h(
       'div',
@@ -171,9 +189,18 @@ export function renderFeatures(container: HTMLElement): () => void {
       h('label', {}, h('span', {}, 'Live'), liveToggle),
       status,
     ),
+    noticeArea,
     chartArea,
+    summaryArea,
   );
-  chartArea.append(loadingState('Loading available links…'));
+  noticeArea.append(loadingState('Loading available links…'));
+
+  /** Clears all three regions -- every render path starts from a blank view. */
+  function clearAll(): void {
+    clear(noticeArea);
+    clear(chartArea);
+    clear(summaryArea);
+  }
 
   let links: LinkSummary[] = [];
   let directory: NodeDirectory = EMPTY_NODE_DIRECTORY;
@@ -194,8 +221,8 @@ export function renderFeatures(container: HTMLElement): () => void {
     const selected = links.find((l) => linkKey(l) === linkSelect.value);
     if (!selected) {
       renderedSignature = '';
-      clear(chartArea);
-      chartArea.append(emptyState('Select a link above to inspect its feature vector.'));
+      clearAll();
+      noticeArea.append(emptyState('Select a link above to inspect its feature vector.'));
       return;
     }
 
@@ -210,8 +237,8 @@ export function renderFeatures(container: HTMLElement): () => void {
     } catch (err) {
       if (disposed) return;
       renderedSignature = '';
-      clear(chartArea);
-      chartArea.append(errorState(err instanceof ApiError ? err.message : String(err)));
+      clearAll();
+      noticeArea.append(errorState(err instanceof ApiError ? err.message : String(err)));
       return;
     }
 
@@ -225,9 +252,9 @@ export function renderFeatures(container: HTMLElement): () => void {
     }
     renderedSignature = signature;
 
-    clear(chartArea);
+    clearAll();
     if (rows.length === 0) {
-      chartArea.append(
+      noticeArea.append(
         emptyState(
           'No features rows for this link/window — the feature pipeline has not produced output for it yet, or this link genuinely has no recent data. Honest empty state, not a placeholder chart.',
         ),
@@ -238,8 +265,8 @@ export function renderFeatures(container: HTMLElement): () => void {
 
     const series = buildSeries(rows);
     if (series.length === 0) {
-      chartArea.append(
-        h('div', {}, h('p', { class: 'sub' }, `${rows.length} feature rows found, but none had a recognizable numeric field. Showing the latest raw vector:`), h('pre', {}, JSON.stringify(rows[rows.length - 1]?.featureVector, null, 2))),
+      noticeArea.append(
+        h('div', { class: 'panel' }, h('p', { class: 'sub' }, `${rows.length} feature rows found, but none had a recognizable numeric field. Showing the latest raw vector:`), h('pre', {}, JSON.stringify(rows[rows.length - 1]?.featureVector, null, 2))),
       );
       return;
     }
@@ -248,7 +275,7 @@ export function renderFeatures(container: HTMLElement): () => void {
     // were requested over -- see featureScale.ts for why.
     const domain = seriesDomain(rows, to.getTime());
     for (const s of series) chartArea.append(renderSeriesChart(s, domain));
-    chartArea.append(
+    summaryArea.append(
       h(
         'p',
         { class: 'sub' },
@@ -281,8 +308,8 @@ export function renderFeatures(container: HTMLElement): () => void {
       links = sortByRecency(res.links);
     } catch (err) {
       if (disposed || !initial) return;
-      clear(chartArea);
-      chartArea.append(errorState(err instanceof ApiError ? err.message : String(err)));
+      clearAll();
+      noticeArea.append(errorState(err instanceof ApiError ? err.message : String(err)));
       return;
     }
     if (disposed) return;
