@@ -501,6 +501,16 @@ recreated, repoint the symlink.
 `ingest` deliberately does **not** auto-migrate - only the `serve` role does,
 so the two never race.
 
+That same compose resource also carries the **`pipeline`** service — the
+feature/occupancy runner described under "Scheduling the feature/occupancy
+pipeline" below. It is there for convenience, not for the UDP reason above:
+this deployment path already has exactly one Coolify resource that runs a
+compose file, and a shell-loop service needs one. It shares the resource's
+environment variables and the same read-only `config.yaml` symlink, which
+also means a restart of the `ingest` resource (after a PSK change, say)
+restarts the pipeline too — harmless, since both commands resume from their
+checkpoints.
+
 ### 4. `label-preserve` as a scheduled task, not a third Application
 
 `label preserve` needs to run once a day; it is **not optional** — without
@@ -878,6 +888,59 @@ documented, tighten or loosen the retention window based on the `df -h`
 trend over the first few weeks of real traffic rather than guessing up
 front — actual CSI record size in practice will vary by how much motion
 (and therefore how many `CSI_BATCH` records) the deployment actually sees.
+
+## Scheduling the feature/occupancy pipeline
+
+`homecsi features` and `homecsi occupancy` are **one-shot commands, not
+daemons**. Each resumes from a checkpoint it persisted on its last run
+(`features` from the newest row per link, `occupancy` from
+`occupancy_checkpoint`), processes whatever is new, and exits. Neither one
+schedules itself, so a deployment that starts only `ingest` and `serve`
+will happily fill `csi_records` while `features` and `occupancy_states`
+stay permanently empty — with no error anywhere to suggest anything is
+wrong.
+
+That failure mode is not recoverable later. `features` and `csi_records`
+live under the same 7-day retention window as everything else in the debug
+tier (migration 007), so a day the pipeline did not run is a day whose raw
+input is gone before anyone notices: it leaves a **permanent hole in the
+occupancy log**, not a backlog to catch up on.
+
+Every deployment path therefore ships a runner, and it is not optional:
+
+| Path | What runs it |
+|---|---|
+| `ops/docker-compose.yml` | the `pipeline` service (long-lived shell loop, 60s) |
+| `ops/docker-compose.coolify.yml` | the `pipeline` service, identical |
+| `ops/docker-compose.ingest.yml` | the `pipeline` service, alongside `ingest` in the same Coolify resource |
+| `ops/systemd/**` | `homecsi-pipeline.timer` → `homecsi-pipeline.service` |
+
+**The two commands always run in this order, sequentially:** `occupancy`
+consumes exactly what `features` just wrote. If `features` fails, that
+tick's `occupancy` is skipped rather than fed a half-written window — the
+shell loop does this with an `if`, the systemd unit with two ordered
+`ExecStart=` lines (`Type=oneshot` stops at the first failure). Because
+both are checkpointed and idempotent, a skipped tick costs only the delay.
+
+**Why 60 seconds.** `features.hopMs` defaults to 500 ms and
+`occupancy.hysteresisMs` to 30 s, so a one-minute cadence is fine enough
+that the schedule is never what delays a state transition, and coarse
+enough that each run has real work to do rather than paying connection
+setup to find nothing.
+
+**Verify it is actually running** — the honest check is row growth, not a
+green checkmark, because the runner is deliberately silent on success:
+
+```sh
+# both counts must keep climbing while nodes are streaming
+psql -c "select count(*) from features;  select count(*) from occupancy_states;"
+# and the most recent state, with the links that drove it
+psql -c "select time, estimate, state from occupancy_states order by time desc limit 5;"
+```
+
+If `csi_records` is growing and `features` is not, the runner is down —
+check the `pipeline` container (`docker compose logs pipeline`) or
+`systemctl list-timers homecsi-pipeline.timer`.
 
 ## Scheduling the training-set preservation sweep
 

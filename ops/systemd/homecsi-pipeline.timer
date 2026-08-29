@@ -1,0 +1,20 @@
+[Unit]
+Description=Home CSI - run the feature/occupancy pipeline every minute (see homecsi-pipeline.service)
+
+[Timer]
+# Every 60s, chosen against features.hopMs = 500 and occupancy.hysteresisMs =
+# 30000: fine enough that the schedule is never what delays a state
+# transition, coarse enough that each run has real work to do.
+#
+# Monotonic (OnBootSec/OnUnitActiveSec), not OnCalendar, because this is a
+# "every N seconds while the machine is up" cadence rather than a wall-clock
+# appointment -- which is also why there is no Persistent=true here (it only
+# applies to OnCalendar timers, and catching up a missed 60s tick is
+# meaningless: both commands resume from their own checkpoints on the next
+# run regardless of how long the gap was).
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

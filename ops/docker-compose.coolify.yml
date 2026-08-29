@@ -362,6 +362,75 @@ services:
       - homecsi
     logging: *default-logging
 
+
+  # The windowed feature extraction and the latched occupancy state machine.
+  #
+  # Both are ONE-SHOT, checkpointed CLI commands (runFeaturePipelineCore /
+  # runOccupancyPipelineCore each resume from the last row they wrote and
+  # then exit), so something has to invoke them on a schedule. Until this
+  # service, nothing in this repository did - every deployment path shipped
+  # `ingest`, `serve` and `label preserve` and no runner for either pipeline,
+  # so `csi_records` accumulated while `features` and `occupancy_states`
+  # stayed empty. That is not cosmetic: `features` is dropped by the 7-day
+  # retention window (packages/db migration 007), so every day the pipeline
+  # does not run becomes a PERMANENT hole in the occupancy log - the rows
+  # behind it are gone before anyone notices.
+  #
+  # Same long-lived-container-with-a-shell-loop shape as `label-preserve`
+  # below, and for the same reason: the schedule ships with `docker compose
+  # up -d` instead of depending on a host cron entry the operator has to
+  # remember. See that service for why `entrypoint:` is overridden and why a
+  # cron daemon is not installed in the runtime image.
+  #
+  # THE TWO COMMANDS RUN SEQUENTIALLY, IN THIS ORDER, ON PURPOSE: `occupancy`
+  # consumes exactly what `features` just wrote, so they share one loop
+  # rather than being two independently-timed services that could interleave.
+  # If `features` fails, this tick's `occupancy` is skipped rather than fed a
+  # half-written window; both are idempotent, so the next tick resumes from
+  # the same checkpoints.
+  pipeline:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: homecsi-server:${HOMECSI_IMAGE_TAG:-local}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # 60s, chosen against features.hopMs = 500 and occupancy.hysteresisMs =
+      # 30000: fine enough that the schedule is never what delays a state
+      # transition, coarse enough that every tick has real work to do.
+      #
+      # Silent on success, deliberately - at this cadence a per-tick "ok"
+      # line is ~1440 a day and would bury the failures. The honest liveness
+      # signal is that `features` and `occupancy_states` keep growing.
+      - |
+        while true; do
+          if node packages/cli/dist/index.js features; then
+            node packages/cli/dist/index.js occupancy || echo "[pipeline] occupancy FAILED at $$(date -u +%FT%TZ)" >&2;
+          else
+            echo "[pipeline] features FAILED at $$(date -u +%FT%TZ), skipping occupancy" >&2;
+          fi
+          sleep 60;
+        done
+    restart: unless-stopped
+    environment: *app-env
+      # config.yaml: see the `migrate` service's comment above. No other
+      # volumes needed - both pipelines only talk to the database.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          # Heavier than `label-preserve`: this one runs every minute and the
+          # feature stage does real DSP over every new CSI record. Still a
+          # guard against a runaway, not a tuned budget - see
+          # docs/deployment.md "VPS Sizing" before raising it.
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - homecsi
+    logging: *default-logging
+
 networks:
   homecsi:
     driver: bridge

@@ -1,5 +1,11 @@
-# Home CSI — the `ingest` role as a standalone Coolify "Docker Compose"
-# resource, alongside the `api` Application and the TimescaleDB database.
+# Home CSI — the `ingest` role, plus the feature/occupancy pipeline runner,
+# as a single Coolify "Docker Compose" resource, alongside the `api`
+# Application and the TimescaleDB database.
+#
+# Two services, for two different reasons — see each one's own comment:
+# `ingest` is here because an Application cannot publish UDP; `pipeline` is
+# here because nothing in this repository was scheduling the one-shot
+# `features`/`occupancy` commands at all.
 #
 # WHY THIS FILE EXISTS SEPARATELY from ops/docker-compose.coolify.yml (which
 # also defines an `ingest` service): that file describes the whole stack as
@@ -115,6 +121,100 @@ services:
     # surface to probe honestly, and a check that always reports healthy is
     # worse than none: it would stop `restart: unless-stopped` from being the
     # thing that notices. See ops/docker-compose.coolify.yml's identical note.
+
+    networks:
+      - coolify
+
+  # The windowed feature extraction and the latched occupancy state machine.
+  #
+  # WHY THIS EXISTS AT ALL: both are ONE-SHOT, checkpointed CLI commands
+  # (runFeaturePipelineCore / runOccupancyPipelineCore each resume from the
+  # last row they wrote and then exit), so something has to invoke them on a
+  # schedule — and until this service, nothing in this repository did.
+  # ops/docker-compose.yml, ops/docker-compose.coolify.yml and ops/systemd/**
+  # all shipped `ingest`, `serve` and `label preserve` and no runner for
+  # either pipeline, so `csi_records` accumulated while `features` and
+  # `occupancy_states` stayed empty. That is not a cosmetic gap: `features`
+  # is dropped by the 7-day retention window (packages/db migration 007), so
+  # every day the pipeline does not run becomes a PERMANENT hole in the
+  # occupancy log — the raw records behind it are gone before anyone
+  # notices. Putting the schedule in the compose file is the same argument
+  # ops/docker-compose.yml already makes for `label-preserve`: it ships with
+  # the deployment instead of depending on an operator remembering to add a
+  # host cron entry.
+  #
+  # THE TWO COMMANDS RUN SEQUENTIALLY, IN THIS ORDER, ON PURPOSE: `occupancy`
+  # consumes exactly what `features` just wrote, so they share one loop
+  # rather than being two independently-timed services that could interleave.
+  # If `features` fails, this tick's `occupancy` is skipped rather than fed a
+  # half-written window; both are idempotent and checkpointed, so the next
+  # tick simply picks up where this one stopped.
+  pipeline:
+    build:
+      # `.` and not `..` — same project-directory reasoning as `ingest` above.
+      context: .
+      dockerfile: Dockerfile
+    # `entrypoint:` REPLACES the image entrypoint (unlike `command:`, which is
+    # appended to it), which is what lets this service run a scheduling loop
+    # instead of a single CLI invocation. There is no cron daemon in the
+    # node:20-bookworm-slim runtime image and adding one to run two commands a
+    # minute is not worth it — identical shape to `label-preserve` in
+    # ops/docker-compose.yml.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # 60s, chosen against features.hopMs = 500 and occupancy.hysteresisMs =
+      # 30000: fine enough that the schedule is never what delays a state
+      # transition, coarse enough that every tick has real work to do.
+      #
+      # Silent on success, deliberately: at this cadence a per-tick "ok" line
+      # is ~1440 lines a day and would bury the failures. The honest liveness
+      # check is that `features` and `occupancy_states` keep growing, not that
+      # the log is chatty. A cold start where the database is not up yet just
+      # fails a tick or two and recovers by itself.
+      - |
+        while true; do
+          if node packages/cli/dist/index.js features; then
+            node packages/cli/dist/index.js occupancy || echo "[pipeline] occupancy FAILED at $$(date -u +%FT%TZ)" >&2;
+          else
+            echo "[pipeline] features FAILED at $$(date -u +%FT%TZ), skipping occupancy" >&2;
+          fi
+          sleep 60;
+        done
+    restart: unless-stopped
+
+    environment:
+      # Spelled out again rather than shared with `ingest` through a YAML
+      # anchor. This file is parsed by Coolify's own compose parser as well as
+      # by `docker compose config`, it contains no anchors today, and a parse
+      # failure here would not fail alone — both services live in one Coolify
+      # resource, so it would take the UDP receiver down with it. Not a risk
+      # worth nine saved lines.
+      HOMECSI_DATABASE_HOST: ${HOMECSI_DATABASE_HOST:?set to the database resource UUID}
+      HOMECSI_DATABASE_PORT: ${HOMECSI_DATABASE_PORT:-5432}
+      HOMECSI_DATABASE_NAME: ${HOMECSI_DATABASE_NAME:-postgres}
+      HOMECSI_DATABASE_USER: ${HOMECSI_DATABASE_USER:-postgres}
+      HOMECSI_DATABASE_PASSWORD: ${HOMECSI_DATABASE_PASSWORD:?required}
+      # Required by the config schema even though this role serves no HTTP:
+      # packages/config validates the whole document, not the subset one role
+      # happens to read. Same reason `ingest` sets it.
+      HOMECSI_SERVER_API_TOKEN: ${HOMECSI_SERVER_API_TOKEN:?required}
+      HOMECSI_CONFIG_PATH: /etc/homecsi/config.yaml
+      HOMECSI_LOGGING_LEVEL: ${HOMECSI_LOGGING_LEVEL:-info}
+
+    volumes:
+      # Neither pipeline writes captures or firmware, but the config document
+      # this validates can point logging at a path under /data, so the volume
+      # is mounted for the same reason `ingest` mounts it.
+      - homecsi_data:/data
+      # The same registry file, read-only — see `ingest` above, including the
+      # symlink and the bind-mounted-inode rotation gotcha, which applies to
+      # this container identically.
+      - '/data/homecsi/config.yaml:/etc/homecsi/config.yaml:ro'
+
+    # No healthcheck: the process is a shell loop that is up or gone, and
+    # "the loop is running" says nothing about whether the pipelines inside
+    # it are succeeding. `restart: unless-stopped` plus the row counts are
+    # the honest signals.
 
     networks:
       - coolify

@@ -130,6 +130,28 @@ deploy procedure (see `docs/deployment.md`).
    journalctl -u homecsi-label-preserve.service -n 50
    ```
 
+7. **Install and enable the feature/occupancy pipeline timer.** Same
+   one-shot-plus-`.timer` shape as step 6 — enable the `.timer`, not the
+   `.service`. Without it `csi_records` accumulate and nothing ever computes
+   `features` or `occupancy_states`, and because features are dropped by the
+   7-day retention window (migration 007), every day the timer is not running
+   becomes a permanent hole in the occupancy log:
+
+   ```sh
+   sudo cp ops/systemd/homecsi-pipeline.service ops/systemd/homecsi-pipeline.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now homecsi-pipeline.timer
+   # Verify it's scheduled, and run it once by hand to confirm it exits clean:
+   systemctl list-timers homecsi-pipeline.timer
+   sudo systemctl start homecsi-pipeline.service
+   journalctl -u homecsi-pipeline.service -n 50
+   ```
+
+   The unit runs `features` and then `occupancy` as two ordered `ExecStart=`
+   lines, so a failing `features` aborts the run before `occupancy` sees a
+   half-written window. Both resume from their own checkpoints, so a skipped
+   or failed tick costs nothing beyond the delay.
+
 ## Restart policy
 
 Both units use `Restart=on-failure` with `RestartSec=5` — they restart

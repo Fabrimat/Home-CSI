@@ -1,0 +1,42 @@
+[Unit]
+Description=Home CSI - feature extraction + occupancy state machine (one-shot)
+Documentation=https://github.com/ (see docs/deployment.md "Scheduling the feature/occupancy pipeline")
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Requires=postgresql.service
+
+# Triggered by homecsi-pipeline.timer -- not enabled/started directly.
+#
+# Both commands are ONE-SHOT and checkpointed: `features`
+# (runFeaturePipelineCore) resumes from the last row it wrote per link,
+# `occupancy` (runOccupancyPipelineCore) from its own checkpoint, and both
+# exit when they run out of new input. Nothing in this repository ran them on
+# a schedule before this unit existed, which left `csi_records` piling up
+# while `features` and `occupancy_states` stayed empty -- and because
+# `features` is dropped by the 7-day retention window (migration 007), every
+# unprocessed day becomes a PERMANENT hole in the occupancy log.
+#
+# THE TWO ExecStart LINES ARE ORDERED AND THE ORDER MATTERS. For Type=oneshot
+# systemd runs them sequentially and stops at the first failure, so
+# `occupancy` is never handed a half-written window: if `features` fails, the
+# unit fails, `occupancy` is skipped, and the next timer tick resumes from the
+# checkpoints both commands left behind.
+
+[Service]
+Type=oneshot
+User=homecsi
+Group=homecsi
+WorkingDirectory=/opt/homecsi/server
+EnvironmentFile=/etc/homecsi/homecsi.env
+ExecStart=/usr/bin/node packages/cli/dist/index.js features
+ExecStart=/usr/bin/node packages/cli/dist/index.js occupancy
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homecsi-pipeline
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/homecsi/data
