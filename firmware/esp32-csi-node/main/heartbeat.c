@@ -67,12 +67,14 @@ void heartbeat_log(const hcs_heartbeat_t *hb)
      * the breakdown - which is what you actually need to tune a node - lives
      * here on the console. */
     ESP_LOGI(TAG,
-             "  drops: rssi=%u notallow=%u budget=%u ring=%u "
-             "(ring full=%u oversize=%u, high water %u/%u)",
+             "  drops: rssi=%u notallow=%u budget=%u ring=%u invalid=%u "
+             "(ring full=%u oversize=%u, high water %u/%u; first_word_invalid "
+             "seen=%u)",
              (unsigned)cs.dropped_rssi, (unsigned)cs.dropped_notallow,
              (unsigned)cs.dropped_budget, (unsigned)cs.dropped_ring,
-             (unsigned)ring->drops_full, (unsigned)ring->drops_oversize,
-             (unsigned)ring->high_water, (unsigned)ring->capacity);
+             (unsigned)cs.dropped_invalid, (unsigned)ring->drops_full,
+             (unsigned)ring->drops_oversize, (unsigned)ring->high_water,
+             (unsigned)ring->capacity, (unsigned)cs.first_word_invalid);
     ESP_LOGI(TAG,
              "  budget: admit snd=%u frn=%u | drop disabled=%u decimated=%u "
              "recrate=%u byterate=%u",

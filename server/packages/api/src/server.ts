@@ -2,12 +2,18 @@ import { existsSync } from 'node:fs';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
+import {
+  DEFAULT_LEAD_TRIM_MS,
+  createInMemoryBoxSessionStore,
+  createInMemoryBoxTakeStore,
+} from '@homecsi/box';
 import { DEFAULT_RETENTION_SAFETY_MARGIN_MS } from '@homecsi/labeling';
 import { extractBearerToken, tokensMatch } from './auth.js';
 import { DeviceTokenRegistry } from './deviceAuth.js';
 import type { HomeCsiDb } from './db/types.js';
 import { LiveHub } from './live/hub.js';
 import { registerAnnotationRoutes } from './routes/annotations.js';
+import { registerBoxRoutes, type BoxRouteDeps } from './routes/box.js';
 import {
   DEFAULT_RETENTION_MAX_AGE_MS,
   registerConfigRoutes,
@@ -27,6 +33,8 @@ import { registerLinkRoutes } from './routes/links.js';
 import { registerLogRoutes } from './routes/logs.js';
 import { registerNodeRoutes } from './routes/nodes.js';
 import { registerOccupancyRoutes } from './routes/occupancy.js';
+import { registerRealtimeRoutes } from './routes/realtime.js';
+import { DeviceModeStore } from './realtime/deviceModeStore.js';
 import { registerStatusRoutes } from './routes/status.js';
 import { registerTopologyRoutes } from './routes/topology.js';
 import { registerWsRoutes } from './routes/ws.js';
@@ -78,6 +86,37 @@ export interface BuildAppOptions {
    * to a fresh, empty store for tests that don't care about it.
    */
   deviceHelloStore?: DeviceHelloStore;
+  /**
+   * The realtime control plane's shared in-memory state (see
+   * realtime/deviceModeStore.ts), read/written by both `GET /device/mode`
+   * (device realm) and `GET|POST /api/realtime` (dashboard realm).
+   * Defaults to a fresh, never-toggled store -- tests that don't care
+   * about realtime mode never need to construct one.
+   */
+  deviceModeStore?: DeviceModeStore;
+  /**
+   * How fast `LiveHub`'s `csi` channel polls while a `box_sessions` row is
+   * open (live/hub.ts). Defaults to that module's own built-in constant
+   * when omitted -- mirrors `config.realtime.liveView.burstPollIntervalMs`
+   * (packages/config/src/schema.ts), which is itself optional.
+   */
+  liveViewBurstPollIntervalMs?: number;
+  /**
+   * How old an open `box_sessions` row may be before `LiveHub` treats it as
+   * abandoned and reverts the `csi` channel to its normal poll interval
+   * (live/hub.ts's `hasOpenBoxSession` doc comment). Defaults to that
+   * module's own built-in constant (which itself mirrors
+   * `config.realtime.device.maxDurationS`) when omitted.
+   */
+  liveViewMaxBoxSessionAgeMs?: number;
+  /**
+   * Box-experiment (docs/box-experiment.md, brief B3) session store/take
+   * store deps for routes/box.ts. Defaults to fresh, empty in-memory stores
+   * (mirroring `deviceHelloStore`'s default above) so tests that don't care
+   * about the box experiment don't need to learn about it; `startServer`
+   * always supplies real Postgres-backed stores.
+   */
+  box?: BoxRouteDeps;
 }
 
 /**
@@ -189,6 +228,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerOccupancyRoutes(app, options.db);
   registerLabelRoutes(app, options.db, options.labelPreservation);
   registerAnnotationRoutes(app, options.db);
+  registerBoxRoutes(
+    app,
+    options.box ?? {
+      sessionStore: createInMemoryBoxSessionStore(),
+      takeStore: createInMemoryBoxTakeStore(),
+      preservation: { leadInMs: DEFAULT_LEAD_TRIM_MS, leadOutMs: DEFAULT_LEAD_TRIM_MS },
+    },
+  );
   // Same retentionMaxAgeMs/safetyMarginMs source of truth as GET /api/config
   // (routes/config.ts) -- reuses the already-optional clientConfig option
   // and its defaults rather than inventing a third way to thread these two
@@ -197,10 +244,16 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     retentionMaxAgeMs: options.clientConfig?.retentionMaxAgeMs ?? DEFAULT_RETENTION_MAX_AGE_MS,
     safetyMarginMs: options.clientConfig?.retentionSafetyMarginMs ?? DEFAULT_RETENTION_SAFETY_MARGIN_MS,
   });
+  // Shared between the device-realm route below and the dashboard-realm
+  // routes registered next, so a node's next poll and an operator's toggle
+  // always agree -- see realtime/deviceModeStore.ts's module doc comment.
+  const deviceModeStore = options.deviceModeStore ?? new DeviceModeStore();
   registerDeviceRoutes(app, {
     firmwareDir: options.otaFirmwareDir ?? DEFAULT_OTA_FIRMWARE_DIR,
     helloStore: options.deviceHelloStore ?? new DeviceHelloStore(),
+    deviceModeStore,
   });
+  registerRealtimeRoutes(app, deviceModeStore);
   registerConfigRoutes(
     app,
     options.clientConfig ?? {
@@ -225,7 +278,10 @@ export async function attachLiveAndStatic(
   options: BuildAppOptions,
 ): Promise<void> {
   await app.register(fastifyWebsocket);
-  const hub = new LiveHub(options.db, app.log);
+  const hub = new LiveHub(options.db, app.log, {
+    burstPollIntervalMs: options.liveViewBurstPollIntervalMs,
+    maxBoxSessionAgeMs: options.liveViewMaxBoxSessionAgeMs,
+  });
   registerWsRoutes(app, hub, options.apiToken);
 
   if (existsSync(options.webAssetsDir)) {

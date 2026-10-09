@@ -1,4 +1,5 @@
 import type { Config } from '@homecsi/config';
+import { DEFAULT_LEAD_TRIM_MS, createPgBoxSessionStore, createPgBoxTakeStore } from '@homecsi/box';
 import { createPool } from '@homecsi/db';
 import {
   DEFAULT_BASELINE_WINDOW_MS,
@@ -11,6 +12,7 @@ import { getWebAssetsDir } from '@homecsi/web';
 import { DeviceTokenRegistry } from './deviceAuth.js';
 import type { ClientConfig } from './routes/config.js';
 import { DEFAULT_OTA_FIRMWARE_DIR, DeviceHelloStore } from './routes/device.js';
+import { DEFAULT_DEVICE_MODE_CONFIG, DeviceModeStore } from './realtime/deviceModeStore.js';
 import { PgHomeCsiDb } from './db/pgDb.js';
 import { createAppLogger } from './logs/logger.js';
 import { attachLiveAndStatic, buildApp } from './server.js';
@@ -64,6 +66,21 @@ export async function startServer(config: Config): Promise<void> {
   const deviceTokenRegistry = new DeviceTokenRegistry(config.nodes);
   const otaFirmwareDir = config.ota?.firmwareDir ?? DEFAULT_OTA_FIRMWARE_DIR;
   const deviceHelloStore = new DeviceHelloStore();
+  // The realtime control plane (docs/device-api.md's GET /device/mode,
+  // GET|POST /api/realtime) is in-memory only, same as deviceHelloStore --
+  // a restart falls back to `normal`, the safe default (see
+  // realtime/deviceModeStore.ts's module doc comment).
+  const deviceModeStore = new DeviceModeStore(config.realtime?.device ?? DEFAULT_DEVICE_MODE_CONFIG);
+
+  // Box-experiment (docs/box-experiment.md, brief B3) session/take stores,
+  // backed by the same pool -- leadIn/leadOutMs are not part of `Config`
+  // (this brief doesn't touch packages/config), so `startServer` supplies
+  // @homecsi/box's own documented default trim.
+  const boxDeps = {
+    sessionStore: createPgBoxSessionStore(pool),
+    takeStore: createPgBoxTakeStore(pool),
+    preservation: { leadInMs: DEFAULT_LEAD_TRIM_MS, leadOutMs: DEFAULT_LEAD_TRIM_MS },
+  };
 
   const app = buildApp({
     db,
@@ -76,6 +93,11 @@ export async function startServer(config: Config): Promise<void> {
     deviceTokenRegistry,
     otaFirmwareDir,
     deviceHelloStore,
+    deviceModeStore,
+    liveViewBurstPollIntervalMs: config.realtime?.liveView.burstPollIntervalMs,
+    liveViewMaxBoxSessionAgeMs:
+      config.realtime?.device.maxDurationS !== undefined ? config.realtime.device.maxDurationS * 1000 : undefined,
+    box: boxDeps,
   });
   await attachLiveAndStatic(app, {
     db,
@@ -88,6 +110,11 @@ export async function startServer(config: Config): Promise<void> {
     deviceTokenRegistry,
     otaFirmwareDir,
     deviceHelloStore,
+    deviceModeStore,
+    liveViewBurstPollIntervalMs: config.realtime?.liveView.burstPollIntervalMs,
+    liveViewMaxBoxSessionAgeMs:
+      config.realtime?.device.maxDurationS !== undefined ? config.realtime.device.maxDurationS * 1000 : undefined,
+    box: boxDeps,
   });
 
   try {

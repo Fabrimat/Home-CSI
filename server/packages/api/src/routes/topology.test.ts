@@ -26,6 +26,7 @@ function node(overrides: Partial<NodeLiveness> & Pick<NodeLiveness, 'id' | 'name
     lastCsiRecordAt: null,
     floor: 0,
     position: null,
+    role: 'house',
     ...overrides,
   };
 }

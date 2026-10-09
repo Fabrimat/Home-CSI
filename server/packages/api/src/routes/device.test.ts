@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DeviceTokenRegistry, deriveDeviceToken } from '../deviceAuth.js';
+import { DeviceModeStore } from '../realtime/deviceModeStore.js';
 import { attachLiveAndStatic, buildApp } from '../server.js';
 import { FakeHomeCsiDb } from '../testUtils/fakeDb.js';
 import { DeviceHelloStore } from './device.js';
@@ -31,7 +32,11 @@ function makeFirmwareDir(): string {
   return mkdtempSync(path.join(tmpdir(), 'homecsi-ota-test-'));
 }
 
-function makeApp(firmwareDir: string, helloStore = new DeviceHelloStore()) {
+function makeApp(
+  firmwareDir: string,
+  helloStore = new DeviceHelloStore(),
+  deviceModeStore = new DeviceModeStore(),
+) {
   const db = new FakeHomeCsiDb();
   const deviceTokenRegistry = new DeviceTokenRegistry([
     { id: 1, psk: NODE_1_PSK },
@@ -44,8 +49,9 @@ function makeApp(firmwareDir: string, helloStore = new DeviceHelloStore()) {
     deviceTokenRegistry,
     otaFirmwareDir: firmwareDir,
     deviceHelloStore: helloStore,
+    deviceModeStore,
   });
-  return { app, helloStore };
+  return { app, helloStore, deviceModeStore };
 }
 
 describe('POST /device/hello', () => {
@@ -336,6 +342,52 @@ describe('GET /device/ota/firmware', () => {
     const { app } = makeApp(firmwareDir);
     const res = await app.inject({ method: 'GET', url: '/device/ota/firmware', headers: deviceAuthHeader(NODE_1_TOKEN) });
     expect(res.statusCode).toBe(404);
+    rmSync(firmwareDir, { recursive: true, force: true });
+  });
+});
+
+describe('GET /device/mode', () => {
+  it('returns the normal profile with a null expiresAt by default, and records the node\'s poll', async () => {
+    const firmwareDir = makeFirmwareDir();
+    const { app, deviceModeStore } = makeApp(firmwareDir);
+    const res = await app.inject({ method: 'GET', url: '/device/mode', headers: deviceAuthHeader(NODE_1_TOKEN) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      mode: 'normal',
+      expiresAt: null,
+      pollIntervalS: 60,
+      soundingIntervalMs: 100,
+      soundingRps: 50,
+      flushBudgetMs: 200,
+      maxRecordsPerBatch: 16,
+    });
+    expect(deviceModeStore.getPublicStatus().nodes).toMatchObject([{ nodeId: 1 }]);
+    rmSync(firmwareDir, { recursive: true, force: true });
+  });
+
+  it('rejects with 401 when no Authorization header is present', async () => {
+    const firmwareDir = makeFirmwareDir();
+    const { app } = makeApp(firmwareDir);
+    const res = await app.inject({ method: 'GET', url: '/device/mode' });
+    expect(res.statusCode).toBe(401);
+    rmSync(firmwareDir, { recursive: true, force: true });
+  });
+
+  it('reflects realtime mode + a hard expiresAt + the faster pollIntervalS once POST /api/realtime enables it', async () => {
+    const firmwareDir = makeFirmwareDir();
+    const { app } = makeApp(firmwareDir);
+    await app.inject({
+      method: 'POST',
+      url: '/api/realtime',
+      headers: apiAuthHeader(),
+      payload: { enabled: true, durationS: 120 },
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/device/mode', headers: deviceAuthHeader(NODE_1_TOKEN) });
+    const body = res.json() as { mode: string; pollIntervalS: number; expiresAt: string | null };
+    expect(body.mode).toBe('realtime');
+    expect(body.pollIntervalS).toBe(10);
+    expect(body.expiresAt).not.toBeNull();
     rmSync(firmwareDir, { recursive: true, force: true });
   });
 });

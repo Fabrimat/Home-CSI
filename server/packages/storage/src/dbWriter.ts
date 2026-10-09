@@ -266,17 +266,26 @@ export class DbWriteQueue {
     expectedMac?: string;
     floor?: number;
     position?: { x: number; y: number };
+    /**
+     * DATA-FLOW FENCE, not a label -- see packages/config/src/schema.ts's
+     * `nodeRoleSchema` comment and migration 011. Defaults to 'house' so a
+     * caller that predates this field (or a node an operator forgot to
+     * annotate) is fenced IN, never silently fenced out of the house
+     * occupancy pipeline.
+     */
+    role?: 'house' | 'box';
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO nodes (id, name, room, expected_mac, floor, pos_x, pos_y)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO nodes (id, name, room, expected_mac, floor, pos_x, pos_y, role)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          room = EXCLUDED.room,
          expected_mac = EXCLUDED.expected_mac,
          floor = EXCLUDED.floor,
          pos_x = EXCLUDED.pos_x,
-         pos_y = EXCLUDED.pos_y`,
+         pos_y = EXCLUDED.pos_y,
+         role = EXCLUDED.role`,
       [
         node.id,
         node.name,
@@ -285,6 +294,7 @@ export class DbWriteQueue {
         node.floor ?? 0,
         node.position?.x ?? null,
         node.position?.y ?? null,
+        node.role ?? 'house',
       ],
     );
   }

@@ -1,0 +1,18 @@
+# sdkconfig.defaults.esp32 - settings specific to the LEGACY target.
+#
+# ESP-IDF applies this automatically, on top of sdkconfig.defaults, when the
+# target is esp32 (`idf.py set-target esp32`). This is the Makeblock Halocode
+# board this project started on; it stays buildable for whichever units are
+# still in service, but esp32c6 (sdkconfig.defaults.esp32c6) is now the
+# documented default target - see docs/hardware-halocode.md and
+# docs/hardware-esp32c6.md.
+#
+# NOT build-verified any more than the rest of this project's sdkconfig - see
+# firmware/README.md's "What is NOT verified" table.
+
+# CPU frequency: the dual-core Xtensa classic ESP32's documented maximum is
+# 240 MHz (versus the single-core RISC-V ESP32-C6's 160 MHz - see
+# sdkconfig.defaults.esp32c6). This was the effective default this project
+# ran at before the target split; pinned explicitly now so it stays true
+# regardless of what ESP-IDF's own default happens to be for this target.
+CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y

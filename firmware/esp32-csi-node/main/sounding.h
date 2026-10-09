@@ -27,4 +27,13 @@ esp_err_t sounding_start(const node_config_t *cfg);
 
 void sounding_get_stats(sounding_stats_t *out);
 
+/* Changes the broadcast interval at runtime (main/mode_client.c switching
+ * between normal and server-proposed realtime rates, and back on expiry).
+ * Jitter percentage is untouched. Takes effect on the task's next scheduled
+ * wake - there is no lock, matching this codebase's existing convention for
+ * cross-task config fields (e.g. net_uplink's stats structs); a plain
+ * uint32_t store is as atomic as this needs. A value of 0 disables sounding
+ * entirely, same as passing 0 at sounding_start(). */
+void sounding_set_interval_ms(uint32_t interval_ms);
+
 #endif /* HCS_SOUNDING_H */

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HomeCsiDb } from '../db/types.js';
+import { DEFAULT_DEVICE_MODE_CONFIG } from '../realtime/deviceModeStore.js';
 import { LiveHub } from './hub.js';
 
 /** Minimal fake standing in for a `ws.WebSocket`, just enough for the hub. */
@@ -33,6 +34,7 @@ function makeDb(overrides: Partial<HomeCsiDb> = {}): HomeCsiDb {
     stopLabelSession: vi.fn(),
     listLabels: vi.fn(),
     createLabel: vi.fn(),
+    hasOpenBoxSession: vi.fn().mockResolvedValue(false),
     ...overrides,
   } as unknown as HomeCsiDb;
 }
@@ -109,6 +111,149 @@ describe('LiveHub', () => {
     hub.removeSocket(socket as never);
     await vi.advanceTimersByTimeAsync(3000);
     expect(pollHeartbeats).not.toHaveBeenCalled();
+  });
+
+  // Regression test for a bug where an unsubscribe-during-an-in-flight-tick
+  // immediately followed by a resubscribe to the SAME feed key left two
+  // permanent, independently-scheduled polling chains racing on that one
+  // feed -- doubling the effective poll rate forever, not just for one
+  // tick. See scheduleNextTick's own doc comment in hub.ts for the exact
+  // mechanism this reproduces and fixes (tying the self-rescheduling chain
+  // to the specific Feed *instance*, not a fresh key lookup).
+  it('does not create two permanent polling chains when the last subscriber unsubscribes mid-tick and a new subscriber immediately resubscribes to the same feed key', async () => {
+    let heldResolve: ((rows: never[]) => void) | undefined;
+    let callCount = 0;
+    // Only the very FIRST call (the one deliberately held open across the
+    // unsubscribe/resubscribe below) stays pending -- every later call
+    // (the new feed's own ticks) resolves immediately, so a fixed feed
+    // count is the only thing this test needs to reason about.
+    const pollCsiRecords = vi.fn(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Promise<never[]>((resolve) => {
+          heldResolve = resolve;
+        });
+      }
+      return Promise.resolve([]);
+    });
+    const db = makeDb({ pollCsiRecords });
+    const hub = new LiveHub(db, { warn: vi.fn() });
+
+    const sub = { channel: 'csi' as const, nodeId: 1, srcMac: 'aa:bb:cc:dd:ee:01', dstMac: 'aa:bb:cc:dd:ee:02' };
+    const firstSocket = new FakeSocket();
+    hub.subscribe(firstSocket as never, sub);
+
+    // Let the feed's first scheduled tick fire and start (and hold open) its DB call.
+    await vi.advanceTimersByTimeAsync(750);
+    expect(pollCsiRecords).toHaveBeenCalledTimes(1);
+    expect(heldResolve).toBeDefined();
+
+    // While that tick is in flight: the last subscriber leaves, then a new
+    // one immediately resubscribes to the EXACT SAME feed key -- a WS
+    // reconnect, or a view unmounting/remounting while a poll is slow.
+    hub.unsubscribe(firstSocket as never, sub);
+    const secondSocket = new FakeSocket();
+    hub.subscribe(secondSocket as never, sub);
+
+    // Now let the held-open call resolve, completing the orphaned tick and
+    // running its `.finally(() => scheduleNextTick(...))`. Plain awaited
+    // microtask flushes, not fake-timer advances: nothing here should
+    // advance real scheduling, only let the already-resolved promise chain
+    // settle before we look at what got (re-)armed.
+    heldResolve?.([]);
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+    }
+
+    // From here on, only ONE polling chain may exist for this feed key:
+    // across several more intervals, pollCsiRecords must be called at most
+    // once per interval -- exactly the invariant the bug violated (it
+    // measured a sustained 2x rate across every interval, not a one-off).
+    pollCsiRecords.mockClear();
+    for (let i = 1; i <= 4; i++) {
+      await vi.advanceTimersByTimeAsync(750);
+      expect(pollCsiRecords).toHaveBeenCalledTimes(i);
+    }
+  });
+});
+
+describe('LiveHub: csi channel burst poll interval while a box_sessions row is open', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('polls the csi channel at the burst interval once box_sessions is known open, instead of the normal interval', async () => {
+    const pollCsiRecords = vi.fn().mockResolvedValue([]);
+    const hasOpenBoxSession = vi.fn().mockResolvedValue(true);
+    const db = makeDb({ pollCsiRecords, hasOpenBoxSession });
+    const hub = new LiveHub(db, { warn: vi.fn() }, {
+      normalPollIntervalMs: 750,
+      burstPollIntervalMs: 150,
+      boxSessionCheckIntervalMs: 50,
+    });
+
+    // Let the box-session checker learn "open" BEFORE anyone subscribes, so
+    // the very first scheduled tick already uses the burst interval.
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hasOpenBoxSession).toHaveBeenCalled();
+
+    const socket = new FakeSocket();
+    hub.subscribe(socket as never, {
+      channel: 'csi',
+      nodeId: 1,
+      srcMac: 'aa:bb:cc:dd:ee:01',
+      dstMac: 'aa:bb:cc:dd:ee:02',
+    });
+
+    await vi.advanceTimersByTimeAsync(150);
+    expect(pollCsiRecords).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps polling the csi channel at the normal interval while no box_sessions row is open', async () => {
+    const pollCsiRecords = vi.fn().mockResolvedValue([]);
+    const db = makeDb({ pollCsiRecords, hasOpenBoxSession: vi.fn().mockResolvedValue(false) });
+    const hub = new LiveHub(db, { warn: vi.fn() }, {
+      normalPollIntervalMs: 750,
+      burstPollIntervalMs: 150,
+      boxSessionCheckIntervalMs: 50,
+    });
+    const socket = new FakeSocket();
+    hub.subscribe(socket as never, {
+      channel: 'csi',
+      nodeId: 1,
+      srcMac: 'aa:bb:cc:dd:ee:01',
+      dstMac: 'aa:bb:cc:dd:ee:02',
+    });
+
+    await vi.advanceTimersByTimeAsync(150);
+    expect(pollCsiRecords).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600); // total 750ms
+    expect(pollCsiRecords).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the configured maxBoxSessionAgeMs through to hasOpenBoxSession on every check, defaulting to the realtime control plane\'s own duration cap when omitted', async () => {
+    const hasOpenBoxSession = vi.fn().mockResolvedValue(false);
+    const db = makeDb({ hasOpenBoxSession });
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- constructed only to exercise its constructor-time side effects (arming the box-session checker).
+    const hub = new LiveHub(db, { warn: vi.fn() }, { boxSessionCheckIntervalMs: 50 });
+
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(hasOpenBoxSession).toHaveBeenCalledWith(DEFAULT_DEVICE_MODE_CONFIG.maxDurationS * 1000);
+  });
+
+  it('uses an explicit maxBoxSessionAgeMs constructor option instead of the default when given one', async () => {
+    const hasOpenBoxSession = vi.fn().mockResolvedValue(false);
+    const db = makeDb({ hasOpenBoxSession });
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- constructed only to exercise its constructor-time side effects (arming the box-session checker).
+    const hub = new LiveHub(db, { warn: vi.fn() }, { boxSessionCheckIntervalMs: 50, maxBoxSessionAgeMs: 42_000 });
+
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(hasOpenBoxSession).toHaveBeenCalledWith(42_000);
   });
 });
 

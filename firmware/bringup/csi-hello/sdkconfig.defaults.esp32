@@ -1,0 +1,3 @@
+# csi-hello, ESP32 (legacy Halocode target). See ../../esp32-csi-node's
+# sdkconfig.defaults.esp32 for the CPU frequency reasoning - identical here.
+CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y

@@ -10,6 +10,7 @@ import { renderFeatures } from './views/features.js';
 import { renderLogs } from './views/logs.js';
 import { renderGroundTruth } from './views/groundTruth.js';
 import { renderHouseMap } from './views/houseMap.js';
+import { renderBox } from './views/box.js';
 
 type ViewRenderer = (container: HTMLElement) => () => void;
 interface ViewDef {
@@ -19,13 +20,14 @@ interface ViewDef {
 }
 
 /**
- * The eight views grouped into the three natural workflows they fall into
- * (brief B18 information architecture pass), rather than one flat,
- * undifferentiated row: live monitoring (what's happening right now),
- * analysis (reviewing/correcting what the system already recorded), and
- * ground truth (declaring what actually happened, for training). `VIEWS`
- * below is derived from this, so the router/dispatch logic still only has
- * to know about one flat list.
+ * The views grouped into the natural workflows they fall into (brief B18
+ * information architecture pass, extended by brief B4's "Experiment" group),
+ * rather than one flat, undifferentiated row: live monitoring (what's
+ * happening right now), analysis (reviewing/correcting what the system
+ * already recorded), ground truth (declaring what actually happened, for
+ * training), and experiment (the standalone box-experiment rig, fenced off
+ * from house occupancy). `VIEWS` below is derived from this, so the
+ * router/dispatch logic still only has to know about one flat list.
  */
 const NAV_GROUPS: Array<{ label: string; views: ViewDef[] }> = [
   {
@@ -49,6 +51,12 @@ const NAV_GROUPS: Array<{ label: string; views: ViewDef[] }> = [
     label: 'Ground truth',
     views: [
       { path: 'ground-truth', label: 'Ground truth', render: renderGroundTruth },
+    ],
+  },
+  {
+    label: 'Experiment',
+    views: [
+      { path: 'box', label: 'Box experiment', render: renderBox },
     ],
   },
 ];
@@ -102,8 +110,8 @@ function renderShell(): void {
   });
 
   const path = currentPath();
-  // Grouped into the three workflows in NAV_GROUPS (live monitoring /
-  // analysis / ground truth) rather than one flat row of eight -- each
+  // Grouped into the workflows in NAV_GROUPS (live monitoring / analysis /
+  // ground truth / experiment) rather than one flat row -- each
   // group is its own `role="group"` with an accessible name, so assistive
   // tech gets the same structure a sighted user sees via the divider/label
   // in CSS. See the `@media (max-width: 640px)` block in style.css for how

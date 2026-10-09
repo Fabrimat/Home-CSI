@@ -194,3 +194,8 @@ void sounding_get_stats(sounding_stats_t *out)
         *out = s_stats;
     }
 }
+
+void sounding_set_interval_ms(uint32_t interval_ms)
+{
+    s_cfg.sounding_interval_ms = interval_ms;
+}

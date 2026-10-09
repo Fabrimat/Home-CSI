@@ -19,6 +19,13 @@ import {
 import type { CaptureRecordEnvelope, DbWriteQueueMetrics } from '@homecsi/storage';
 import { createRateLimiter, type Logger } from './logger.js';
 import { createEmptyMetrics, type IngestMetrics, type RejectReason } from './metrics.js';
+import {
+  CLOSED_BOX_SESSION_GATE,
+  DEFAULT_PERSISTED_RATE_CEILING,
+  PersistedRateLimiter,
+  type BoxSessionGateLike,
+  type PersistedRateLimiterLike,
+} from './persistedRateLimiter.js';
 
 const MAGIC_BUF = Buffer.from(MAGIC);
 
@@ -40,6 +47,8 @@ export interface DbWriteQueueLike {
     floor?: number;
     /** Optional {x, y} metres on that floor's own operator-chosen origin -- omitted means "not yet placed" (see nodeSchema's no-trilateration contract). */
     position?: { x: number; y: number };
+    /** DATA-FLOW FENCE, not a label -- defaults to 'house' when omitted. See packages/config's `nodeRoleSchema` and migration 011. */
+    role?: 'house' | 'box';
   }): Promise<void>;
   getMetrics(): DbWriteQueueMetrics;
   close(): Promise<void>;
@@ -51,6 +60,21 @@ export interface IngestDeps {
   logger: Logger;
   /** Injectable clock, for deterministic tests. Defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Injectable persisted-rate ceiling gating the DbWriteQueue path (never
+   * CaptureWriter -- see persistedRateLimiter.ts). Defaults to a real
+   * `PersistedRateLimiter` built from `config.realtime?.persistedRateCeiling`
+   * (or `DEFAULT_PERSISTED_RATE_CEILING` when that whole section is
+   * omitted) -- tests only need to inject their own when they want to
+   * observe/control the ceiling's exact behaviour directly.
+   */
+  rateLimiter?: PersistedRateLimiterLike;
+  /**
+   * Injectable "is at least one box_sessions row currently open" gate.
+   * Defaults to `CLOSED_BOX_SESSION_GATE` (never bypass) -- `runIngest`
+   * (index.ts) always supplies a real, pool-backed poller in production.
+   */
+  boxSessionGate?: BoxSessionGateLike;
 }
 
 export interface IngestEngine {
@@ -81,6 +105,27 @@ export function createIngestEngine(config: Config, deps: IngestDeps): IngestEngi
   const nodesById = new Map(config.nodes.map((n) => [n.id, n]));
   const keysById = new Map(config.nodes.map((n) => [n.id, Buffer.from(n.psk, 'base64')]));
   const replayWindows = new Map<number, ReplayWindow>();
+
+  const persistedRateLimiter: PersistedRateLimiterLike =
+    deps.rateLimiter ??
+    new PersistedRateLimiter(config.realtime?.persistedRateCeiling ?? DEFAULT_PERSISTED_RATE_CEILING);
+  const boxSessionGate: BoxSessionGateLike = deps.boxSessionGate ?? CLOSED_BOX_SESSION_GATE;
+
+  /**
+   * Whether one more CSI record for this (nodeId, linkMac) key may reach
+   * DbWriteQueue right now -- the persisted-rate ceiling's admission check.
+   * `linkMac` is the record's own `srcMac` (the transmitting peer), the
+   * same (nodeId, linkMac) granularity @homecsi/features keys `features`
+   * rows by. A role='box' node bypasses the ceiling entirely, but ONLY
+   * while a box_sessions row is open -- so a recording take can capture a
+   * dense burst -- and a role='house' node is NEVER bypassed, regardless
+   * of box_sessions state.
+   */
+  function admitForPersistence(nodeId: number, linkMac: string, nowMs: number): boolean {
+    const node = nodesById.get(nodeId);
+    if (node?.role === 'box' && boxSessionGate.isOpen()) return true;
+    return persistedRateLimiter.admit(nodeId, linkMac, nowMs);
+  }
 
   function reject(reason: RejectReason, extra: Record<string, unknown> = {}): void {
     metrics.rejected[reason]++;
@@ -264,13 +309,24 @@ export function createIngestEngine(config: Config, deps: IngestDeps): IngestEngi
       }
 
       if (decoded.type === 'CSI_BATCH') {
-        deps.dbWriteQueue.enqueueCsiBatch(
-          nodeId,
-          captureRecord.bootEpoch,
-          captureRecord.seq,
-          new Date(receivedAtMs),
-          decoded.batch,
+        // Persisted-rate ceiling: gates ONLY this DbWriteQueue enqueue,
+        // never the capture write above (already completed with the full,
+        // unfiltered batch by the time this runs). See admitForPersistence
+        // and persistedRateLimiter.ts's module doc comment.
+        const admittedRecords = decoded.batch.records.filter((rec) =>
+          admitForPersistence(nodeId, rec.srcMac, receivedAtMs),
         );
+        const droppedCount = decoded.batch.records.length - admittedRecords.length;
+        if (droppedCount > 0) metrics.rejected.persisted_rate_limited += droppedCount;
+        if (admittedRecords.length > 0) {
+          deps.dbWriteQueue.enqueueCsiBatch(
+            nodeId,
+            captureRecord.bootEpoch,
+            captureRecord.seq,
+            new Date(receivedAtMs),
+            { ...decoded.batch, records: admittedRecords },
+          );
+        }
       } else {
         deps.dbWriteQueue.enqueueHeartbeat(
           nodeId,

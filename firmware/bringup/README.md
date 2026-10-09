@@ -1,9 +1,19 @@
 # Node bring-up — do this first
 
-Nothing else in this repository can be trusted until **one** Makeblock
-Halocode has been confirmed to produce CSI. This document is the ordered
-procedure to get there, written for the machine this project is actually
-developed on: **Windows 11 on ARM64**.
+Nothing else in this repository can be trusted until **one** board has been
+confirmed to produce CSI. This document is the ordered procedure to get
+there, written for the machine this project is actually developed on:
+**Windows 11 on ARM64**.
+
+The board this procedure was first written against was the Makeblock
+Halocode (ESP32) — most of the specifics below (serial bridge chips, flash
+backup, `esptool` invocations) are generic to any ESP32-family board and
+apply just as well to the fleet's new primary target, **ESP32-C6**
+(`docs/hardware-esp32c6.md`); the Halocode itself is now the legacy/secondary
+board (`docs/hardware-halocode.md`). Where a step is board-specific this
+document says so, and there is a dedicated **ESP32-C6 addendum** right after
+Step 6 for the one thing that genuinely differs: what to read off `csi-hello`
+and where to copy it.
 
 Work through it in order. Every step either produces a fact you write into
 the [board facts table](#board-facts-record-what-you-measure) or unblocks the
@@ -254,8 +264,13 @@ and, most importantly, the **detected flash size**.
 
 Record every line of both in the table. In particular:
 
-- If the chip is **not** a plain ESP32 (Xtensa), stop. This firmware targets
-  `esp32`, and the CSI API differs across targets.
+- If the chip is neither a plain ESP32 (Xtensa) nor an ESP32-C6 (RISC-V),
+  stop. This firmware only targets `esp32` (legacy Halocode boards) and
+  `esp32c6` (primary, pinned-default target - no `set-target` needed for it,
+  see `sdkconfig.defaults`) — the CSI API differs across ESP32 variants, and
+  building for the wrong one (`idf.py set-target esp32` for a C6 board, or
+  vice versa) fails the build long before this matters, but it is worth
+  knowing which one you have before going further.
 - The flash size you see here is what `partitions.csv` must fit inside. That
   table is sized for 2 MB precisely so this step cannot surprise you, but you
   still want the number written down.
@@ -323,7 +338,8 @@ does not.
 
 ```bash
 cd firmware/bringup/csi-hello
-idf.py set-target esp32
+# esp32c6 is the pinned default target - no set-target needed for it.
+# For a legacy Halocode board instead: idf.py set-target esp32
 idf.py menuconfig          # "csi-hello" -> SSID and password of any 2.4 GHz AP
 idf.py build
 ```
@@ -360,9 +376,9 @@ Windows). You are looking for lines like:
 STA MAC: 24:6f:28:xx:xx:xx   <-- record this in the bring-up table
 Joining SSID 'myssid'. Waiting for CSI callbacks...
 
-[  12345678 us] src=aa:bb:cc:dd:ee:01 rssi= -47 ch= 6 sig=1 mcs= 7 bw=0 sec=0
-                stbc=0 noise= -95 len= 384 amp[0..5]=12 14 13 15 11 12
-                (cb=1 printed=1)
+[  12345678 us] src=aa:bb:cc:dd:ee:01 rssi= -47 ch= 6 sig=1 rate= 15 mcs= 7
+                bw=0 sec=0 stbc=0 fwi=0 noise= -95 len= 384 amp[0..5]=12 14
+                13 15 11 12  (cb=1 printed=1)
 ```
 
 **This is the moment the project becomes real.** Check three things:
@@ -387,6 +403,65 @@ boards where one is quietly dead will waste far more time later.
 
 ---
 
+## Step 6 (ESP32-C6 addendum) — turning assumed values into measured ones
+
+`docs/hardware-esp32c6.md` lists a table of values for this board that are
+**assumed** (from Espressif's own published documentation) rather than
+measured on the units in hand. This is the procedure that converts each one
+to "measured" — run it once per C6 board, on top of the base Step 6 above:
+
+1. **`len` -> `CONFIG_HCS_CSI_MAX_LEN`.** Same as the base step: take the
+   largest `len` printed across a few minutes of normal traffic and put it in
+   Kconfig. `docs/hardware-esp32c6.md` notes Espressif's own figures suggest
+   this will typically be *smaller* than the classic ESP32's ~384 bytes (on
+   the order of ~53 usable HT20 subcarriers), but the 384 default is still a
+   safe ceiling either way — this step is what tells you whether it is a
+   loose one.
+
+2. **`sig`/`stbc`/`rate` -> confirm `classify_format()`'s mapping still
+   holds.** `main/csi_capture.c`'s `classify_format()` maps `sig_mode`/`stbc`
+   onto the protocol's `csi_format` tag and says explicitly that it is
+   unverified against C6 hardware. Watch these fields for a few minutes of
+   real traffic (walk around, let a phone/laptop generate normal Wi-Fi
+   traffic on the dedicated AP) and note anything unexpected — in particular,
+   a `rate` value that looks nothing like the non-HT/HT rates you would see
+   from an ESP32 (the C6 is an 802.11ax/Wi-Fi 6 radio; if HE frames ever reach
+   this callback, `rate` is the first place that would show up). Record what
+   you see in `docs/hardware-esp32c6.md`'s table. **Do not add a new
+   `csi_format` value yourself** — that constant lives in exactly two places
+   (`docs/protocol.md` and `server/packages/protocol`) by design; if the
+   evidence here genuinely calls for one, write up what you saw and hand it
+   to whoever owns that contract next, rather than changing it from a
+   bring-up session.
+
+3. **`fwi` -> confirm the `first_word_invalid` trim is doing something (or
+   isn't).** `csi_capture.c` trims 4 leading bytes off any record where
+   `wifi_csi_info_t.first_word_invalid` is set, and counts it either way. If
+   you see `fwi=1` here at all, that confirms the quirk exists on this board
+   and the trim is live; if it is always `0`, the trim is simply inert (safe,
+   not wrong) on your board/IDF combination. Either way, once the real
+   firmware is running, the same fact is visible fleet-wide in the heartbeat
+   log as the `first_word_invalid` counter (see `main/heartbeat.c`).
+
+4. **Wave your hand test, again, specifically for C6.** The C6 is SISO per
+   link (see `docs/hardware-esp32c6.md`) and HT40 is noted as often unstable
+   on this chip — this app already forces `WIFI_BW_HT20`, so nothing to do
+   here except repeat the base Step 6's motion check and confirm it still
+   holds on this radio.
+
+5. **LED GPIO, if you care about the indicator.** `main/Kconfig.projbuild`'s
+   `HCS_LED_GPIO` default (8) is Espressif's documented pin for the onboard
+   WS2812 on their ESP32-C6-DevKitC-1 reference board — correct if that is
+   what you have, unverified otherwise. If your C6 boards are a different
+   board/module, this is the same "measure it or leave the backend at `none`"
+   situation the Halocode's LED always was; see Step 8 below.
+
+Copy whatever you observe into `docs/hardware-esp32c6.md`'s "what is measured
+vs. assumed" table before moving on — that table, not this procedure, is the
+durable record.
+
+---
+
 ## Step 7 — Move on to the real firmware
 
 Once at least two boards produce CSI, go to
@@ -400,15 +475,18 @@ and placement. Carry forward:
 
 ---
 
-## Step 8 (optional) — The LED ring
+## Step 8 (optional) — The status LED
 
-The Halocode is documented as having a 12-LED RGB ring. **This project has not
-verified the driver chip or the GPIO it is wired to**, so the firmware ships
-with the LED backend set to `none` (it logs state changes instead) and
-everything else works identically.
+The Halocode is documented as having a 12-LED RGB ring; the primary target's
+reference design, Espressif's ESP32-C6-DevKitC-1, documents a single onboard
+WS2812 on GPIO8 instead. **Neither has been verified by this project on the
+actual boards in hand** — the DevKitC-1's pin is a real published fact, but
+only for that exact board, not for whatever C6 module/carrier you actually
+have — so the firmware ships with the LED backend set to `none` (it logs
+state changes instead) and everything else works identically regardless.
 
-If you want the indicator, determine the pin — from the stock firmware, from a
-scope, or by careful trial — and set `CONFIG_HCS_LED_GPIO`,
+If you want the indicator, determine the pin — from the board's own
+schematic, from a scope, or by careful trial — and set `CONFIG_HCS_LED_GPIO`,
 `CONFIG_HCS_LED_COUNT` and a backend in `menuconfig`. A wrong pin costs you an
 indicator, not a node. Record what you find in the table.
 

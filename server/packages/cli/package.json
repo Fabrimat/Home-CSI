@@ -12,6 +12,7 @@
     ".": "./dist/index.js"
   },
   "dependencies": {
+    "@homecsi/box": "0.1.0",
     "@homecsi/config": "0.1.0",
     "@homecsi/db": "0.1.0",
     "@homecsi/ingest": "0.1.0",

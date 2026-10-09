@@ -33,6 +33,15 @@ export class FakeHomeCsiDb implements HomeCsiDb {
   labelSessions: LabelSessionRow[] = [];
   labels: LabelRow[] = [];
   annotations: AnnotationRow[] = [];
+  /** Toggle for `hasOpenBoxSession()` -- tests set this directly rather than seeding a fake `box_sessions` row list. */
+  openBoxSession = false;
+  /**
+   * When the simulated open session (if `openBoxSession` is true) started.
+   * `null` means "started just now" -- age 0, always within any `maxAgeMs`
+   * -- so existing tests that only ever toggle the boolean are unaffected
+   * by the age-cutoff behaviour `hasOpenBoxSession` now has.
+   */
+  openBoxSessionStartedAt: Date | null = null;
   private nextSessionId = 1;
   private nextLabelId = 1;
   private nextAnnotationId = 1;
@@ -362,5 +371,11 @@ export class FakeHomeCsiDb implements HomeCsiDb {
     }
 
     return summaries.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt)).slice(0, params.limit);
+  }
+
+  async hasOpenBoxSession(maxAgeMs: number): Promise<boolean> {
+    if (!this.openBoxSession) return false;
+    const startedAt = this.openBoxSessionStartedAt ?? new Date();
+    return Date.now() - startedAt.getTime() <= maxAgeMs;
   }
 }

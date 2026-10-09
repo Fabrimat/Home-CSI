@@ -119,6 +119,46 @@ for itself.
   integrating motion transitions over time (`docs/architecture.md`), not a
   per-window classifier. Don't reintroduce a per-window "occupancy"
   prediction without that framing.
+- **The box experiment is fenced off in code, not by convention.** The
+  gesture experiment (`docs/box-experiment.md`, `server/packages/box`) *is*
+  a per-window classifier, and that is legitimate there because a gesture
+  label makes no occupancy claim. What keeps the two apart is structural,
+  and must stay that way: nodes carry `role: 'house' | 'box'`
+  (`packages/config`'s `nodeSchema`, `nodes.role` from migration 011), and
+  `packages/features`'s record query keeps only `role = 'house'`. That
+  single choke point is the fence -- occupancy reads `features`, so fencing
+  there fences both. Without it, the box rig's own nodes -- whose links sit
+  inside a closed box at ~30 cm and say nothing about house occupancy --
+  feed the latch and permanently corrupt `occupancy_states`, the one table
+  this project keeps forever. Note the filter selects on the **observing**
+  node, not the source MAC: a house node that hears a box node's soundings
+  still produces an ordinary house link, and that is correct rather than a
+  leak (see `docs/box-experiment.md`) -- a person at the bench genuinely is
+  home, so that latch is a true positive. **Never add a second path from
+  `csi_records` into `features`/`occupancy` that skips the role filter**,
+  and never let
+  `@homecsi/features` or `@homecsi/occupancy` import `@homecsi/box` (an
+  ESLint `no-restricted-imports` rule in `server/eslint.config.js` enforces
+  this -- if it ever seems to be in your way, you are about to breach the
+  fence). A paragraph in a doc is not the fence; the query filter is.
+- **The persisted save rate is an invariant, not a mode.** Ingest's
+  per-`(node_id, link_mac)` ceiling on records reaching `DbWriteQueue` is
+  always on and deliberately knows nothing about whether realtime mode is
+  active -- that state lives in the API process's memory, and ingest has no
+  coordination channel to it on purpose. It gates the **database path
+  only**: `CaptureWriter` keeps receiving every record, because the capture
+  tree is the replay/DR path. Don't decimate captures, and don't "improve"
+  this by teaching ingest about the current mode. Dense data reaches disk
+  only inside an explicit, short box take.
+- **Realtime mode never rides the UDP protocol.** The burst-mode command
+  travels over the existing `/device/*` HTTP realm (`GET /device/mode`,
+  `docs/device-api.md`). `docs/protocol.md` §1's "no server -> node channel"
+  property still holds and must keep holding -- a UDP downlink would mean
+  reasoning about nonce construction and anti-replay in the reverse
+  direction, for no gain. Realtime always carries a hard `expiresAt` that
+  the **node** enforces on its own monotonic clock, so a node that loses the
+  server reverts by itself; never add a burst path that can outlive its
+  deadline or that depends on a server round-trip to end.
 - **2.4 GHz honesty.** Passive sniffing of a home's existing (mostly 5
   GHz/WiFi 6) devices is best-effort garnish. The dedicated-AP broadcast-
   sounding mesh is the primary signal. Don't write anything that implies
@@ -140,4 +180,7 @@ for itself.
   may resume sending.
 - **No retention/compression policy in `packages/db` migrations 001-002.**
   That's brief B3's job (migration 003+); the base schema created here
-  must stay policy-free.
+  must stay policy-free. Migrations 011 (`nodes.role`, `box_sessions`) and
+  012 (`box_take_records`) are also deliberately policy-free, for the same
+  reason `event_annotations` is (migration 009): their volume is bounded by
+  how much an operator actually records, not by an ingest rate.

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CsiFormat,
   MsgType,
+  decodeCsiBatch,
   encodeCsiBatchDatagram,
   encodeHeader,
   encodeHeartbeatDatagram,
@@ -10,6 +11,7 @@ import {
   type CsiBatch,
   type Heartbeat,
 } from '@homecsi/protocol';
+import type { Config } from '@homecsi/config';
 import type { CaptureRecordEnvelope, DbWriteQueueMetrics } from '@homecsi/storage';
 import { createIngestEngine, type CaptureWriterLike, type DbWriteQueueLike } from './engine.js';
 import type { Logger } from './logger.js';
@@ -433,6 +435,117 @@ describe('createIngestEngine: expectedMac soft-attribution', () => {
     expect(metrics.accepted).toBe(1);
     expect(dbWriteQueue.csiCalls).toHaveLength(1);
     expect(metrics.perNode[1]?.macMismatches).toBe(1);
+  });
+});
+
+// --- Persisted-rate ceiling (gates DbWriteQueue only, never CaptureWriter) ---
+
+/** Minimal, valid `config.realtime` section a test can attach to `makeTestConfig`'s result and mutate freely. */
+function realtimeConfigWithCeiling(recordsPerSec: number, burstRecords: number): NonNullable<Config['realtime']> {
+  return {
+    persistedRateCeiling: { recordsPerSec, burstRecords },
+    device: {
+      normal: { pollIntervalS: 60, soundingIntervalMs: 100, soundingRps: 50, flushBudgetMs: 200, maxRecordsPerBatch: 16 },
+      realtime: { pollIntervalS: 10, soundingIntervalMs: 20, soundingRps: 200, flushBudgetMs: 50, maxRecordsPerBatch: 64 },
+      defaultDurationS: 600,
+      maxDurationS: 3600,
+    },
+    liveView: { burstPollIntervalMs: 150 },
+  };
+}
+
+function makeCsiRecordsSharingLink(count: number, srcMac: string): CsiBatch['records'] {
+  return Array.from({ length: count }, (_, i) => ({
+    srcMac,
+    dstMac: 'aa:bb:cc:dd:ee:ff',
+    rssi: -42,
+    rate: 11,
+    sigMode: 1,
+    mcs: 7,
+    bandwidth: 0,
+    channel: 6,
+    secondaryChannel: 0,
+    noiseFloor: -95,
+    rxTimestampUs: BigInt(100 + i),
+    csiFormat: CsiFormat.Lltf,
+    csiData: Buffer.from([1, 2, 3, 4]),
+  }));
+}
+
+describe('createIngestEngine: persisted-rate ceiling', () => {
+  it('drops excess records from the DbWriteQueue path once a (node,link) burst is exhausted, while CaptureWriter still receives every record', async () => {
+    const config = makeTestConfig([{ id: 1, psk: testPsk(1) }]);
+    config.realtime = realtimeConfigWithCeiling(1, 2); // burst of 2 tokens per (node, linkMac)
+    const captureWriter = new FakeCaptureWriter();
+    const dbWriteQueue = new FakeDbWriteQueue();
+    const logger = makeFakeLogger();
+    const engine = createIngestEngine(config, { captureWriter, dbWriteQueue, logger });
+
+    const datagram = encodeCsiBatchDatagram({
+      nodeId: 1,
+      bootEpoch: 0,
+      seq: 0,
+      key: Buffer.from(testPsk(1), 'base64'),
+      batch: makeCsiBatch({ records: makeCsiRecordsSharingLink(3, 'aa:bb:cc:dd:ee:01') }),
+    });
+
+    engine.handleDatagram(datagram);
+    await flushAsync();
+
+    // Only 2 of the 3 records (the configured burst) reach DbWriteQueue...
+    expect(dbWriteQueue.csiCalls).toHaveLength(1);
+    expect(dbWriteQueue.csiCalls[0]?.batch.records).toHaveLength(2);
+    expect(engine.getMetrics().rejected.persisted_rate_limited).toBe(1);
+
+    // ...but CaptureWriter received the full, unfiltered batch of 3 -- the
+    // capture tree is the replay/disaster-recovery path and must never be
+    // decimated by this ceiling.
+    expect(captureWriter.records).toHaveLength(1);
+    const captured = decodeCsiBatch(captureWriter.records[0]!.payload);
+    expect(captured.records).toHaveLength(3);
+  });
+
+  it('bypasses the ceiling entirely for a role=box node while a box_sessions row is open, and never bypasses a role=house node', async () => {
+    const config = makeTestConfig([
+      { id: 1, psk: testPsk(1), role: 'house' },
+      { id: 2, psk: testPsk(2), role: 'box' },
+    ]);
+    config.realtime = realtimeConfigWithCeiling(1, 1); // burst of just 1 token
+    const dbWriteQueue = new FakeDbWriteQueue();
+    const engine = createIngestEngine(config, {
+      captureWriter: new FakeCaptureWriter(),
+      dbWriteQueue,
+      logger: makeFakeLogger(),
+      boxSessionGate: { isOpen: () => true },
+    });
+
+    engine.handleDatagram(
+      encodeCsiBatchDatagram({
+        nodeId: 1,
+        bootEpoch: 0,
+        seq: 0,
+        key: Buffer.from(testPsk(1), 'base64'),
+        batch: makeCsiBatch({ records: makeCsiRecordsSharingLink(3, 'aa:bb:cc:dd:ee:01') }),
+      }),
+    );
+    await flushAsync();
+    // House node: the box_sessions-open gate never applies to it -- still
+    // capped at the configured burst of 1.
+    expect(dbWriteQueue.csiCalls[0]?.batch.records).toHaveLength(1);
+
+    engine.handleDatagram(
+      encodeCsiBatchDatagram({
+        nodeId: 2,
+        bootEpoch: 0,
+        seq: 0,
+        key: Buffer.from(testPsk(2), 'base64'),
+        batch: makeCsiBatch({ records: makeCsiRecordsSharingLink(3, 'aa:bb:cc:dd:ee:02') }),
+      }),
+    );
+    await flushAsync();
+    // Box node: fully bypassed despite the identical tiny ceiling, because
+    // the injected boxSessionGate reports an open box_sessions row.
+    expect(dbWriteQueue.csiCalls[1]?.batch.records).toHaveLength(3);
   });
 });
 

@@ -442,6 +442,11 @@ void net_uplink_get_stats(net_uplink_stats_t *out)
     }
 }
 
+void net_uplink_reconfigure_batch(uint16_t max_records, uint32_t flush_budget_ms)
+{
+    csi_batcher_reconfigure(&s_batcher, max_records, flush_budget_ms);
+}
+
 bool net_uplink_has_sent(void)
 {
     return s_has_sent;

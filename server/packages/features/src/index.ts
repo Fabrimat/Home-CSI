@@ -9,7 +9,12 @@
  *
  * Contract: see packages/cli/CONTRACTS.md ("features"). Owned by brief B4.
  */
-export { runFeaturePipeline, runFeaturePipelineCore } from './pipeline.js';
+export {
+  runFeaturePipeline,
+  runFeaturePipelineCore,
+  createPgCsiRecordSource,
+  createPgFeatureSink,
+} from './pipeline.js';
 export type {
   CsiRecordRow,
   CsiRecordSource,

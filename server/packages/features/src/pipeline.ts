@@ -193,15 +193,31 @@ interface RawCsiRecordRow {
   csi_data: Buffer;
 }
 
-function createPgCsiRecordSource(pool: DbPool): CsiRecordSource {
+/**
+ * THE STRUCTURAL FENCE (brief B1): the `JOIN nodes` + `n.role = 'house'`
+ * below is the one choke point that keeps box-experiment CSI out of the
+ * house occupancy pipeline -- `@homecsi/occupancy` reads `features`, which
+ * is fed entirely by this query, so fencing here fences both stages. A
+ * join against `nodes.role` (never a hardcoded node-id list) so adding or
+ * removing box-experiment nodes in `config.yaml` never requires touching
+ * this query. See packages/config/src/schema.ts's `nodeRoleSchema` and
+ * migration 011 for where `role` itself comes from.
+ *
+ * Exported (not just used internally) so pipeline.test.ts can exercise
+ * this exact query shape against a fake pool without a live database --
+ * see that file's "role fence" test.
+ */
+export function createPgCsiRecordSource(pool: DbPool): CsiRecordSource {
   return {
     async fetchRecords(sinceExclusiveMs, limit) {
       const sinceIso = sinceExclusiveMs === null ? null : new Date(sinceExclusiveMs).toISOString();
       const result = await pool.query<RawCsiRecordRow>(
-        `SELECT time, node_id, src_mac, rssi, csi_format, csi_data
-         FROM csi_records
-         WHERE ($1::timestamptz IS NULL OR time > $1::timestamptz)
-         ORDER BY time ASC
+        `SELECT c.time, c.node_id, c.src_mac, c.rssi, c.csi_format, c.csi_data
+         FROM csi_records c
+         JOIN nodes n ON n.id = c.node_id
+         WHERE n.role = 'house'
+           AND ($1::timestamptz IS NULL OR c.time > $1::timestamptz)
+         ORDER BY c.time ASC
          LIMIT $2`,
         [sinceIso, limit],
       );
@@ -225,7 +241,7 @@ interface RawFeatureRow {
   feature_vector: LinkFeatureVector;
 }
 
-function createPgFeatureSink(pool: DbPool): FeatureSink {
+export function createPgFeatureSink(pool: DbPool): FeatureSink {
   return {
     async writeFeatures(rows) {
       if (rows.length === 0) return;

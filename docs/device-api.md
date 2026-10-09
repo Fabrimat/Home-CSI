@@ -122,6 +122,134 @@ accepted, intended gap, not a bug. `otaState` is an opaque string as far as
 the server is concerned; it is surfaced to operators verbatim via
 `GET /api/devices`, not interpreted.
 
+### `GET /device/mode`
+
+The realtime control plane's device-facing half (brief B1). A node polls
+this at whatever `pollIntervalS` it was last told to use, and applies the
+other fields to its own sounding/capture behavior until its next poll:
+
+```json
+{ "mode": "normal", "revision": 3, "expiresAt": null, "pollIntervalS": 60,
+  "soundingIntervalMs": 100, "soundingRps": 50, "flushBudgetMs": 200, "maxRecordsPerBatch": 16 }
+```
+
+- `mode`: `"normal"` or `"realtime"` -- which knob profile this response's
+  remaining fields describe.
+- `revision`: increments on every server-side toggle. Purely informational
+  for the node (it always just applies the fields it was given); the
+  dashboard uses it to tell whether a given node has picked up the latest
+  toggle yet (`GET /api/realtime`'s `nodes[].appliedRevision`).
+- `expiresAt`: an ISO timestamp in `realtime` mode, always `null` in
+  `normal` mode. **This is the safety-critical field.** A node MUST track
+  it against its own local clock and revert to its own built-in `normal`
+  behavior the instant that deadline passes, independent of whether it can
+  still reach the server at all. This is what makes the whole feature safe
+  to ship: a node that loses the network mid-burst (or the server process
+  restarts and forgets it ever set `expiresAt`, see below) reverts on its
+  own, unassisted, no later than its last-known `expiresAt` -- it can never
+  get stuck bursting forever from a single missed message, the way a
+  stateless "start burst" command with no expiry would.
+- `pollIntervalS`: `60` in `normal` mode, `10` in `realtime` mode (both
+  configurable, see "Config" below). **Enabling realtime therefore has up
+  to ~60 seconds of latency before every node has picked it up** -- a node
+  mid-way through its `normal`-mode poll interval will not see the change
+  until its next scheduled poll. This is stated plainly, not engineered
+  away: the alternative (a server-initiated push) would require a
+  server-to-node channel this protocol deliberately does not have (see
+  `docs/protocol.md` section 1 and this doc's own intro) — and a *node*
+  entering realtime a few seconds late is a far smaller problem than a node
+  *staying* in it if a control message were ever missed, which is exactly
+  the failure mode `expiresAt`'s local-clock enforcement rules out. Once a
+  node IS in `realtime` mode, its own next poll is only `10` seconds away,
+  so leaving realtime is fast even though entering it is not.
+- `soundingIntervalMs`/`soundingRps`/`flushBudgetMs`/`maxRecordsPerBatch`:
+  the same node-side tuning knobs firmware brief B2's `Kconfig` already
+  bounds independently -- this server-requested profile is a REQUEST, not
+  an override of the node's own compiled-in ceilings. A server (or an
+  operator via `POST /api/realtime`, see below) asking for something
+  the node's own firmware considers unsafe is refused twice: once by
+  `config.realtime`'s own caps on this server, and again by the node's own
+  Kconfig ceiling regardless of what this response says.
+
+**STATE IS IN-MEMORY ONLY**, exactly like `POST /device/hello`'s recorded
+telemetry (see above): a server restart resets to `mode: "normal"`,
+`revision: 0`, `expiresAt: null` for every node, with no database write and
+no migration backing it. This is intended, not a gap -- and it is safe
+specifically *because* of the `expiresAt` local-clock rule above: a node
+that was mid-burst when the server restarted keeps enforcing the deadline
+it was already given (the server forgetting doesn't extend it), and the
+next time that node polls, it simply learns the server thinks it's
+`normal` again and agrees. The one thing a restart genuinely loses is the
+operator-facing bookkeeping of *who has picked up the current toggle* --
+see `GET /api/realtime`'s `knownSinceRestart` below for how that surface
+tells the truth about that gap instead of guessing.
+
+### `GET /api/realtime` (dashboard token, not a device route)
+
+```json
+{ "mode": "realtime", "revision": 3, "expiresAt": "2026-01-01T00:10:00.000Z",
+  "knownSinceRestart": true,
+  "nodes": [ { "nodeId": 1, "lastPolledAt": "2026-01-01T00:00:12.000Z", "appliedRevision": 3 } ] }
+```
+
+`mode` is a **tri-state**, not just `"normal"`/`"realtime"`: immediately
+after a server restart, before this server process has itself toggled
+realtime even once, `mode` reads `"unknown"` and `knownSinceRestart` is
+`false` -- **never** a bare `"normal"`. Nodes may still be mid-burst from a
+realtime window this fresh, empty, in-memory store has no record of ever
+having set; claiming `"normal"` in that state would be an outright false
+statement, not merely a stale one. Once this server process has handled at
+least one `POST /api/realtime` since it started, `mode` reports the real,
+current toggle state and `knownSinceRestart` becomes `true` (and stays
+`true` for the rest of that process's life). `nodes` lists every node that
+has called `GET /device/mode` since this process started, with its last
+poll time and which `revision` it applied -- so an operator can see who has
+actually picked up the current toggle, not just that the server accepted
+it.
+
+### `POST /api/realtime` (dashboard token, not a device route)
+
+```json
+{ "enabled": true, "durationS": 300, "nodeIds": [1, 2] }
+```
+
+Toggles the realtime control plane and returns `200` with the resulting
+mode object (same shape as `GET /device/mode`'s response). `durationS` is
+optional (defaults to `config.realtime.device.defaultDurationS`, 600s) and
+is rejected with `400` if it exceeds `config.realtime.device.maxDurationS`
+(3600s) -- realtime **always** carries a hard, bounded expiry, never an
+open-ended one. `nodeIds` is optional (`"all"` when omitted or explicit) --
+an array scopes the toggle to specific nodes only (e.g. just the
+box-experiment nodes), so nodes outside that list keep polling `normal`
+even while the toggle is globally `"realtime"`. `{ "enabled": false }`
+reverts to `normal` immediately (any `durationS`/`nodeIds` are ignored).
+
+### Config
+
+```yaml
+realtime:
+  persistedRateCeiling:
+    recordsPerSec: 50
+    burstRecords: 200
+  device:
+    normal:      { pollIntervalS: 60, soundingIntervalMs: 100, soundingRps: 50, flushBudgetMs: 200, maxRecordsPerBatch: 16 }
+    realtime:    { pollIntervalS: 10, soundingIntervalMs: 20,  soundingRps: 200, flushBudgetMs: 50,  maxRecordsPerBatch: 64 }
+    defaultDurationS: 600
+    maxDurationS: 3600
+  liveView:
+    burstPollIntervalMs: 150
+```
+
+Optional, like `training`/`ota` elsewhere in this file, and for the same
+reason: added after the rest of the schema, with safe built-in defaults
+(the values shown above) for when the whole section is omitted, so an
+existing `config.yaml` with no `realtime:` key still loads and behaves
+exactly as before. `persistedRateCeiling` is unrelated to the two routes
+above -- it is `@homecsi/ingest`'s always-on, mode-independent ceiling on
+how fast any one (node, link) pair may write to the database (see
+`packages/ingest/src/persistedRateLimiter.ts`), independent of whichever
+mode `GET /device/mode` is currently reporting.
+
 ### `GET /device/ota/manifest`
 
 Returns the currently staged manifest, if any, and if the calling node is

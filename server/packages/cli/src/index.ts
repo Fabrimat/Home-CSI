@@ -124,6 +124,19 @@ program
     });
   });
 
+program
+  .command('box')
+  .argument('[args...]', 'box-experiment subcommand and its arguments')
+  .allowUnknownOption()
+  .description('box-experiment: take recording, k-NN training, dataset export (docs/box-experiment.md)')
+  .action(async (args: string[]) => {
+    await runOwnedCommand(async () => {
+      const config = loadConfig(getConfigPath());
+      const mod = await import('@homecsi/box');
+      await mod.runBoxCli(args, config);
+    });
+  });
+
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err);
   process.exitCode = 1;

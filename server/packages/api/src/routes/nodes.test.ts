@@ -22,6 +22,7 @@ describe('GET /api/nodes', () => {
         lastCsiRecordAt: null,
         floor: -1,
         position: { x: 1.5, y: 2.25 },
+        role: 'house',
       },
     ];
     const app = buildApp({ db, apiToken: API_TOKEN, webAssetsDir: NONEXISTENT_ASSETS_DIR });
@@ -33,8 +34,39 @@ describe('GET /api/nodes', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const body = res.json() as { nodes: Array<{ floor: number; position: { x: number; y: number } | null }> };
+    const body = res.json() as {
+      nodes: Array<{ floor: number; position: { x: number; y: number } | null; role: string }>;
+    };
     expect(body.nodes[0]?.floor).toBe(-1);
     expect(body.nodes[0]?.position).toEqual({ x: 1.5, y: 2.25 });
+    expect(body.nodes[0]?.role).toBe('house');
+  });
+
+  it('exposes role so the dashboard can filter box-experiment nodes out of the house view', async () => {
+    const db = new FakeHomeCsiDb();
+    db.nodes = [
+      {
+        id: 5,
+        name: 'box-node-1',
+        room: 'garage',
+        expectedMac: null,
+        createdAt: '2026-01-01T00:00:00Z',
+        lastHeartbeatAt: null,
+        lastCsiRecordAt: null,
+        floor: 0,
+        position: null,
+        role: 'box',
+      },
+    ];
+    const app = buildApp({ db, apiToken: API_TOKEN, webAssetsDir: NONEXISTENT_ASSETS_DIR });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/nodes',
+      headers: { authorization: `Bearer ${API_TOKEN}` },
+    });
+
+    const body = res.json() as { nodes: Array<{ role: string }> };
+    expect(body.nodes[0]?.role).toBe('box');
   });
 });

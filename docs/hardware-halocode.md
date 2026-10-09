@@ -1,5 +1,12 @@
 # Hardware: Makeblock Halocode
 
+> **This board is now legacy/secondary.** The fleet's primary target is the
+> ESP32-C6 (`docs/hardware-esp32c6.md`); `firmware/esp32-csi-node`'s default
+> `idf.py set-target` is `esp32c6`, not `esp32`. This document and the
+> `esp32` build target are kept for whatever Halocode units remain in
+> service - nothing below is deleted or invalidated by that change, it is
+> simply no longer where new deployment effort goes.
+
 This document separates **what is actually known** about the Halocode board
 from **what must be verified on the bench** before firmware work (brief B2)
 can rely on it. Do not treat anything in the "to be verified" table as fact

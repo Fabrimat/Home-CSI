@@ -26,6 +26,14 @@ export interface NodeLiveness {
   floor: number;
   /** Relative position on this node's floor, or `null` if not yet placed (migration 010: `pos_x`/`pos_y` are both nullable). */
   position: NodePosition | null;
+  /**
+   * DATA-FLOW FENCE, not a label (migration 011, packages/config's
+   * `nodeRoleSchema`) -- exposed here purely for the dashboard to filter
+   * on (brief B4's box-experiment view); it plays no part in any query
+   * this package itself runs. The actual fence lives entirely in
+   * @homecsi/features's pipeline query.
+   */
+  role: 'house' | 'box';
 }
 
 export interface HeartbeatRow {
@@ -355,6 +363,25 @@ export interface HomeCsiDb {
    * `listLinks`. See `LinkMotionSummary` for field semantics.
    */
   listLinkMotion(params: TimeRange & { limit: number }): Promise<LinkMotionSummary[]>;
+
+  /**
+   * Whether at least one `box_sessions` row is currently open
+   * (`ended_at IS NULL`, migration 011) AND started no longer ago than
+   * `maxAgeMs` -- backs `LiveHub`'s adaptive `csi` channel poll interval
+   * (live/hub.ts): fast (~150ms) while a recording take is running, the
+   * channel's normal interval otherwise.
+   *
+   * The age cap matters on its own: without it, a session an operator
+   * forgot to close (closed the tab mid-take, a crash -- migration 011 has
+   * no automatic closing mechanism) would read as "open" forever, keeping
+   * the dashboard's live view at the fast interval indefinitely for as
+   * long as anyone is connected. Callers pass the SAME cap
+   * `config.realtime.device.maxDurationS` already enforces on
+   * `POST /api/realtime` (`LiveHub` threads it through, converted to ms),
+   * so there is exactly one number an operator reasons about for "how long
+   * can a realtime/box-take window possibly last" everywhere it matters.
+   */
+  hasOpenBoxSession(maxAgeMs: number): Promise<boolean>;
 }
 
 /**

@@ -3,6 +3,13 @@
  * Bump this whenever behaviour on the wire or in the field changes - it is
  * the only way an operator can tell which node is running what.
  *
+ * 0.2.0: ESP32-C6 becomes the primary/pinned-default target (esp32, the
+ * Halocode, stays supported); adds main/mode_client.c, a new server-driven
+ * control path (GET /device/mode, docs/device-api.md) that can temporarily
+ * change a node's sounding/batching rates within hard local ceilings and a
+ * locally-enforced deadline - see firmware/README.md's "Realtime (burst)
+ * mode" section.
+ *
  * THIS FILE IS AUTHORITATIVE, but it is not the only copy: ESP-IDF stamps
  * esp_app_desc_t.version (which the bootloader and main/ota.c's anti-flap
  * check read out of an OTA slot) from CMake's PROJECT_VER instead, because a
@@ -13,7 +20,7 @@
 #define HCS_APP_VERSION_H
 
 #define HCS_FW_VERSION_MAJOR 0
-#define HCS_FW_VERSION_MINOR 1
+#define HCS_FW_VERSION_MINOR 2
 #define HCS_FW_VERSION_PATCH 0
 
 /* "major.minor.patch" as a string literal, for the hello body and logs. The

@@ -169,7 +169,9 @@ cp ops/config.production.example.yaml ops/config.yaml
 
 Edit `ops/config.yaml` and fill in the `nodes:` list with the keys from
 step 6 — one entry per physical node, each with its own `id`, `name`,
-`room`, and `psk` (base64), **never reusing a PSK across nodes** (see that
+`room`, and `psk` (base64), plus `role: box` on any box-experiment node
+(see "Key management" below — that one must be set *before* the node's PSK
+first goes live), **never reusing a PSK across nodes** (see that
 file's own header comment, and "Key management" below, for why reuse
 breaks the wire protocol's nonce-uniqueness guarantee outright, not just
 mildly). Leave `server.apiToken` and `database.password` as the
@@ -498,6 +500,15 @@ editing it on every `api` deploy, so **restart ingest after rotating a PSK**
 or it keeps checking against the old registry silently. And if `api` is ever
 recreated, repoint the symlink.
 
+The same restart requirement applies to the optional `realtime` config
+section (`docs/device-api.md`'s `persistedRateCeiling`) -- `ingest` only
+reads it at startup, so editing `config.yaml` alone does not change the
+running process's ceiling. On this Coolify path specifically, remember that
+a **Redeploy of the `api` Application reverts on-disk `config.yaml` edits**
+back to whatever content its own Storage tab has saved, so an edit made by
+hand on the host (rather than through that tab) will look like it took
+effect until the next Redeploy silently discards it.
+
 `ingest` deliberately does **not** auto-migrate - only the `serve` role does,
 so the two never race.
 
@@ -729,6 +740,22 @@ file's header spells out the handful of genuine mechanical differences
   by `node_id`, stored as base64. Treat that file with at least the same
   care as `ops/.env` — mode `600`, never committed, only the
   `.example.yaml` template is meant to be tracked.
+- **Registering a box-experiment node? Set `role: box` in that same
+  `nodes:` entry before its PSK first goes live.** `role` defaults to
+  `'house'` (correctly fencing in every existing deployment that has never
+  heard of the box experiment) -- but that also means a box-experiment
+  node registered *without* `role: box` is silently treated as an ordinary
+  house node: its CSI flows straight into `features` and from there
+  latches `occupancy_states` (the permanent, no-retention log this whole
+  fence exists to protect), the moment the node powers on and starts
+  producing hand-wave CSI at the bench. Setting `role: box` *after* the
+  fact does not fix this retroactively: it stops new records from crossing
+  the fence starting at the next ingest restart, but does not un-compute
+  or delete `features`/`occupancy_states` rows already derived from that
+  node's earlier, mislabeled window. Fold this into step 6/7's per-node
+  checklist alongside the PSK and placement fields, not as an
+  afterthought — see `docs/box-experiment.md` for the full rationale and
+  bring-up ordering.
 - **Node side:** the same raw 32 bytes are flashed into the node's NVS at
   provisioning time (firmware detail — see `docs/architecture.md` /
   firmware provisioning docs for the exact flashing step).

@@ -76,6 +76,7 @@ await mod.<exportName>(<args>);
 | `occupancy`        | `@homecsi/occupancy` | `runOccupancyPipeline` | `(config: Config) => Promise<void>`                               | Owned by **B4**. |
 | `label [args...]`  | `@homecsi/labeling`  | `runLabelCli`          | `(args: string[], config: Config) => Promise<void>`               | `args` is every token after `label` on the command line, unparsed (`packages/cli` uses `allowUnknownOption()` so your own sub-flags like `--count` pass through untouched). You own all further sub-command parsing. Owned by **B4**. |
 | `train [args...]`  | `@homecsi/labeling`  | `runTrain`             | `(args: string[], config: Config) => Promise<void>`               | Same `args` convention as `label`. Per `docs/roadmap.md`, this should export data / drive an external (Python) training step, not train a model in-process. Owned by **B4**. |
+| `box [args...]`    | `@homecsi/box`       | `runBoxCli`            | `(args: string[], config: Config) => Promise<void>`               | Same `args` convention as `label`/`train` -- `packages/cli` uses `allowUnknownOption()` so `@homecsi/box`'s own sub-flags pass through untouched. This one, unlike `train`, DOES train a model in-process (a simple k-NN, not the whole-house occupancy model `docs/roadmap.md`'s "train outside Node" guidance is about) -- see docs/box-experiment.md. Owned by **B3**. |
 
 `Config` in every signature above is `import type { Config } from '@homecsi/config'`
 (the fully validated config object — see `packages/config/src/schema.ts`
@@ -103,6 +104,34 @@ actually does. Current sub-commands: `session start|stop|list`, `add`,
   `joinLabelsWithFeatures`) rather than one row per label — a point label's
   output is unchanged.
 
+### `box` sub-command surface (informational, not a signature contract)
+
+`runBoxCli`'s own signature (`(args, config) => Promise<void>`) never changes
+-- `@homecsi/box` owns parsing everything after `box` itself (see its row
+above). This section documents that sub-command surface anyway, for the same
+reason the `label` section below it does. Current sub-commands: `list`,
+`train`, `export`, `preserve`.
+
+- `box list [--limit <n>]` -- lists `box_sessions` (one row per take),
+  newest-started first, each with its preserved record count.
+- `box train [--k <n>] [--min-takes <n>] [--min-records <n>] [--out <dir>]`
+  -- runs the leave-one-take-out k-NN classifier over every closed, usable
+  take and prints an honest report (accuracy alongside the majority-class
+  and random-chance baselines, per-class take counts, and a confusion
+  matrix -- or, below `--min-takes` per class, a refusal explaining why, per
+  docs/box-experiment.md). `--out <dir>` additionally writes `report.json`/
+  `report.txt` there. `--min-records` overrides the minimum preserved-record
+  count a take needs to count as usable (`DEFAULT_MIN_TAKE_RECORDS`).
+- `box export --out <path> [--min-records <n>]` -- writes one CSV row per
+  closed, feature-computable take (`sessionId,gestureClass,geometryNote,
+  recordCount,usable,feature_0..feature_N`) for external analysis --
+  features are computed fresh from each take's preserved raw CSI, per
+  `docs/box-experiment.md` ("why takes preserve raw CSI, not features").
+- `box preserve [--session <id>]` -- the standing backstop sweep (mirrors
+  `label preserve`): attempts to copy every closed take's raw CSI into
+  `box_take_records`, independent of whether the stop-time hook already
+  did. Safe to run standing against a deployment's entire take history.
+
 ## Non-CLI contract: `@homecsi/web`
 
 Not wired into `packages/cli` — `@homecsi/api`'s `startServer` is expected
@@ -116,7 +145,7 @@ to call it directly:
 
 `packages/cli`'s `package.json` lists every sibling package it imports
 (`@homecsi/ingest`, `@homecsi/storage`, `@homecsi/features`,
-`@homecsi/occupancy`, `@homecsi/labeling`, `@homecsi/api`) as a
+`@homecsi/occupancy`, `@homecsi/labeling`, `@homecsi/api`, `@homecsi/box`) as a
 dependency, and its `tsconfig.json` lists each as a project reference —
 both already present so `tsc -b` builds in the right order and dynamic
 `import()` type-checks. You should not need to touch either file. If your

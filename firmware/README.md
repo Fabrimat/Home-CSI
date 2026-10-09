@@ -1,7 +1,12 @@
 # Home CSI node firmware
 
-ESP-IDF v5.x firmware for the Makeblock Halocode (ESP32) nodes that capture
-Wi-Fi CSI and ship it, encrypted, to the ingest server.
+ESP-IDF v5.x firmware for the nodes that capture Wi-Fi CSI and ship it,
+encrypted, to the ingest server. **ESP32-C6 is the primary, pinned-default
+target** (`sdkconfig.defaults`; a plain `idf.py build` on a fresh checkout
+targets it with no `set-target` needed - see `docs/hardware-esp32c6.md`);
+the project's original board, the Makeblock Halocode (ESP32), is now
+legacy/secondary and needs an explicit `idf.py set-target esp32`
+(`docs/hardware-halocode.md`).
 
 ```
 firmware/
@@ -161,10 +166,10 @@ MACs, then re-provision.
 > copies of the app plus its metadata do not fit in 2 MB at any sane app size.
 > This is a hardware prerequisite, not a tuning knob.
 >
-> The Halocode's flash size has never been verified by this project. Up to
-> v0.1.0 the table was deliberately sized for 2 MB *because* nobody had looked.
-> Look now, on the bench, with a USB cable in your hand — not after the node is
-> screwed to a wall.
+> Flash size has never been verified by this project on any board it targets
+> - Halocode or ESP32-C6. Up to v0.1.0 the table was deliberately sized for
+> 2 MB *because* nobody had looked. Look now, on the bench, with a USB cable
+> in your hand — not after the node is screwed to a wall.
 >
 > If a board really does turn out to be 2 MB: it can still run this firmware,
 > minus OTA. Restore the single-`factory` table from git history and set
@@ -173,7 +178,8 @@ MACs, then re-provision.
 
 ```bash
 cd firmware/esp32-csi-node
-idf.py set-target esp32
+# esp32c6 is the pinned default target (sdkconfig.defaults) - no set-target
+# needed for it. For a legacy Halocode board instead: idf.py set-target esp32
 idf.py menuconfig        # "Home CSI node"; at minimum set the channel
 idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
@@ -201,7 +207,8 @@ resets the boot epoch, which the server treats as a rollback. See
 | `CONFIG_HCS_SOUNDING_INTERVAL_MS` | 100 | 10 Hz per node. See [the sounding mesh](#the-sounding-mesh). |
 | `CONFIG_HCS_ALLOW_KCONFIG_FALLBACK` | y | Turn **off** for production images. |
 | `CONFIG_HCS_OTA_CHECK_INTERVAL_S` | 3600 | How often a node asks whether there is a new image. Hourly is plenty; a rollout is measured in soak hours. |
-| LED backend | `none` | The LED pin is unverified; see [Status LED](#status-led). |
+| LED backend | `none` | The LED pin is unverified for your specific board; see [Status LED](#status-led). |
+| `CONFIG_HCS_MODE_POLL_MIN_INTERVAL_S` and the rest of "Realtime (burst) mode" | 10s floor, etc. | Hard ceilings on what a `GET /device/mode` burst directive from the server may do to this node; see [Realtime (burst) mode](#realtime-burst-mode). |
 
 ---
 
@@ -337,6 +344,60 @@ a fault — `node_config_is_deployable()` does not look at `api_base`.
 
 ---
 
+## Realtime (burst) mode
+
+`main/mode_client.c` polls `GET /device/mode` (same device HTTP realm as OTA,
+same bearer token, `docs/device-api.md`) so an operator can ask a node to run
+temporarily "hot" — faster sounding, tighter batching — for a recording
+experiment, without a firmware update or a reflash. It reuses `ota.c`'s HTTP
+client pattern and the same device-token derivation
+(`components/csi_protocol/device_token.c`); a poll failure is the same
+failure register as OTA's hello: a logged warning, never fatal, never part
+of any rollback health checkpoint, and it never interferes with the
+`seq`/`boot_epoch` invariants of `docs/protocol.md` S4.1 (this client never
+touches the UDP path at all).
+
+The response shape (`docs/device-api.md`, brief B1):
+
+```json
+{ "mode": "normal", "revision": 3, "expiresAt": null, "pollIntervalS": 60,
+  "soundingIntervalMs": 100, "soundingRps": 50, "flushBudgetMs": 200, "maxRecordsPerBatch": 16 }
+```
+
+Applied at runtime, no reboot required: `sounding_set_interval_ms()`
+(sounding.c), `csi_capture_reconfigure_bw()` →
+`bw_budget_reconfigure()` (the sounding-class record rate,
+`components/csi_protocol/bw_budget.c`), and `net_uplink_reconfigure_batch()`
+→ `csi_batcher_reconfigure()` (`max_records_per_batch`/`flush_budget_ms`).
+
+**Two independent safety properties, neither of which trusts the server:**
+
+- **Hard Kconfig ceilings on every knob** ("Realtime (burst) mode" in
+  `menuconfig`): `HCS_MODE_POLL_MIN_INTERVAL_S`,
+  `HCS_REALTIME_MIN_SOUNDING_INTERVAL_MS`, `HCS_REALTIME_MAX_SOUNDING_RPS`,
+  `HCS_REALTIME_MIN_FLUSH_BUDGET_MS`, `HCS_REALTIME_MAX_RECORDS_PER_BATCH`,
+  `HCS_REALTIME_MAX_DURATION_S`. A server value beyond a ceiling is clamped
+  to it and logged — never applied verbatim, never rejected outright. A
+  buggy or hostile device API cannot make a node exceed its own configured
+  ceilings, ever.
+- **A local, monotonic deadline.** `expiresAt` is converted to this node's
+  own `esp_timer` clock exactly once, at the moment realtime mode is
+  applied, using a duration that is itself clamped to
+  `HCS_REALTIME_MAX_DURATION_S` regardless of what the wall clock or the
+  server claims (`hcs_mode_deadline_mono_us()`,
+  `components/csi_protocol/mode_policy.c`). Every check after that is a pure
+  monotonic comparison against that fixed deadline — no server round trip,
+  and no second look at the wall clock. The node reverts to normal mode on
+  expiry unconditionally, including when the server has gone away entirely:
+  a wedged experiment or a dead device API can never leave the mesh running
+  hot indefinitely.
+
+A realtime directive with no parseable `expiresAt` is refused outright
+(treated as `"normal"`) rather than accepted as an unbounded burst — burst
+mode is only ever entered with a locally-enforced exit already committed.
+
+---
+
 ## The sounding mesh
 
 Each node broadcasts one tiny 802.11 vendor-specific action frame every
@@ -361,9 +422,12 @@ full at the top of `main/sounding.c`.
 
 ## Status LED
 
-**The Halocode LED hardware is unverified by this project.** The board is
-documented as having a 12-LED RGB ring, but neither the driver chip nor its
-GPIO has been confirmed here. So:
+**The LED hardware is unverified by this project on either target board.**
+The legacy Halocode is documented as having a 12-LED RGB ring, but neither
+the driver chip nor its GPIO was ever confirmed here. The primary target's
+reference design, Espressif's ESP32-C6-DevKitC-1, documents a single onboard
+WS2812 on GPIO8 - a real published fact, but only for that exact board, not
+for whatever C6 module/carrier the fleet's actual units turn out to be. So:
 
 - the pin, LED count and brightness cap are all Kconfig values;
 - three backends are selectable and **the default is `none`** (state changes
@@ -409,8 +473,8 @@ breakdown is what you actually need to tune a node, so it is logged to the
 console on every heartbeat:
 
 ```
-I heartbeat: up=3600s heap=142312/128044 rssi=-52 ch=6 sntp=1 | seen=48213 kept=41002 drop=7211 | batches=2561 sendfail=0 | fw=0.1.0
-I heartbeat:   drops: rssi=1204 notallow=0 budget=6007 ring=0 (ring full=0 oversize=0, high water 41/64)
+I heartbeat: up=3600s heap=142312/128044 rssi=-52 ch=6 sntp=1 | seen=48213 kept=41002 drop=7211 | batches=2561 sendfail=0 | fw=0.2.0
+I heartbeat:   drops: rssi=1204 notallow=0 budget=6007 ring=0 invalid=0 (ring full=0 oversize=0, high water 41/64; first_word_invalid seen=112)
 I heartbeat:   budget: admit snd=38911 frn=2091 | drop disabled=0 decimated=5980 recrate=27 byterate=0
 I heartbeat:   sounding: sent=36000 failed=0
 ```
@@ -436,6 +500,13 @@ How to read the drop reasons:
   csi-hello reported.
 - **`high water N/M`** — peak ring occupancy since boot. Comfortably below M
   is healthy; pinned at M explains the full-drops.
+- **`invalid` / `first_word_invalid seen`** — `wifi_csi_info_t.first_word_invalid`
+  was set on the driver's report. The 4 leading bytes are trimmed and the
+  record is delivered 4 bytes shorter (`csi_len` reflects that, per
+  `docs/protocol.md` S9.2); `invalid` only counts the rare case where a
+  record was so short that nothing survived the trim, so it should normally
+  stay at or near zero even when `first_word_invalid seen` is not. This is
+  expected behaviour, not a fault — see `csi_capture.c`'s `csi_rx_cb()`.
 - **`sounding: failed`** — this node could not transmit. It shows up on the
   *other* nodes as missing links, so check it here rather than wondering there.
 
@@ -559,8 +630,11 @@ pass and are real; nothing else has been executed.** Specifically:
 
 | Not verified | Where it is parameterised / how it fails |
 |---|---|
-| The firmware compiles under ESP-IDF | No toolchain was available. Expect to fix symbol renames between IDF versions before it builds |
-| **Halocode flash size — now load-bearing** | `partitions.csv` requires **4 MB** for its A/B OTA layout and will not boot on a 2 MB part. `esptool.py flash_id` gives the truth, and it is the first thing to run. The fallback is the single-`factory` 2 MB table in git history, which costs you OTA and nothing else |
+| The firmware compiles under ESP-IDF, on either target | No toolchain was available. Expect to fix symbol renames between IDF versions before it builds - on `esp32c6` in particular, which needs ESP-IDF v5.1+ and was never build-verified while writing this |
+| **Flash size, on either board — now load-bearing** | `partitions.csv` requires **4 MB** for its A/B OTA layout and will not boot on a 2 MB part. `esptool.py flash_id` gives the truth, and it is the first thing to run, on a Halocode or a C6 board alike. The fallback is the single-`factory` 2 MB table in git history, which costs you OTA and nothing else |
+| That ESP32-C6's `wifi_csi_config_t` fields are used identically to the classic ESP32's | `csi_capture.c` assumes this (Espressif's own `esp-csi` project configures both this way); logged explicitly at `csi_capture_start()` under `CONFIG_IDF_TARGET_ESP32C6`. If a field is actually named or shaped differently on this target/IDF version, `idf.py build` fails loudly at that line rather than silently misconfiguring CSI |
+| `first_word_invalid` handling, on real hardware | `csi_capture.c`'s `csi_rx_cb()` trims 4 bytes when the driver sets this flag. csi-hello prints it (`fwi=`) so this can be confirmed per board; if it is always 0, the trim is simply inert |
+| Everything the burst/realtime mode client depends on ESP-IDF for | `main/mode_client.c`'s HTTP client setup mirrors `main/ota.c`'s, so it carries the same "never compiled" caveat as the OTA row below. The clamping/deadline logic it calls into (`components/csi_protocol/mode_policy.c`) **is** covered by host tests |
 | That a `factory`-less A/B table boots, and that `idf.py flash` targets `ota_0` | `partitions.csv` has `ota_0`/`ota_1` and no `factory`. ESP-IDF documents booting the first OTA slot when otadata is empty and there is no factory app, but nothing here has confirmed it. If it turns out otherwise the symptom is immediate and on the bench: the first flash does not boot at all |
 | Every ESP-IDF call in `main/ota.c` | `esp_ota_*`, `esp_http_client_*`, `esp_crt_bundle_attach`, `cJSON`, `mbedtls_md_*`. Written against the v5.x API and never compiled. `esp_app_desc.h` in particular has moved between IDF versions |
 | That `esp_ota_end()` flushes the last bytes before the SHA-256 read-back | The read-back sits between `esp_ota_end()` and `esp_ota_set_boot_partition()` precisely because of this. If it turns out bytes are still buffered at that point, the symptom is safe and obvious: the hash mismatches, the node refuses the image, and it logs exactly that. It never installs something unverified |
@@ -569,7 +643,7 @@ pass and are real; nothing else has been executed.** Specifically:
 | Whether 8 kB of stack is enough for a TLS handshake here | `OTA_TASK_STACK` in `main/ota.c`. Too small shows up as a stack-overflow panic on the first manifest fetch, not as corruption |
 | CSI record lengths | `CONFIG_HCS_CSI_MAX_LEN` (default 384). Wrong values show as the `oversize` counter, never as corruption |
 | `csi_format` classification | `classify_format()` in `csi_capture.c`. A wrong tag degrades interpretation but never desynchronises a batch, because consumers parse by `csi_len` |
-| LED chip and GPIO | Kconfig; backend defaults to `none` |
+| LED chip and GPIO, on either board | Kconfig; backend defaults to `none`. The C6 default GPIO (8) is Espressif's documented pin for their own DevKitC-1 reference board, not a measurement of the operator's actual boards |
 | Serial bridge chip | Nothing in the firmware depends on it; see `bringup/README.md` Step 2 |
 | `esp_wifi_80211_tx` with an action frame while associated | `sounding.c`. Failures are counted and shown in the heartbeat, not silent |
 | SNTP/mbedTLS/RMT API details across IDF v5.x point releases | Guarded and commented where version-sensitive |

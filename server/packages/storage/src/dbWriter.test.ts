@@ -97,7 +97,7 @@ describe('DbWriteQueue: batch insert', () => {
     expect(pool.calls[0]?.sql).toContain('floor');
     expect(pool.calls[0]?.sql).toContain('pos_x');
     expect(pool.calls[0]?.sql).toContain('pos_y');
-    expect(pool.calls[0]?.params).toEqual([1, 'node-1', 'kitchen', null, 0, null, null]);
+    expect(pool.calls[0]?.params).toEqual([1, 'node-1', 'kitchen', null, 0, null, null, 'house']);
 
     await queue.upsertNode({
       id: 2,
@@ -105,8 +105,20 @@ describe('DbWriteQueue: batch insert', () => {
       room: 'basement',
       floor: -1,
       position: { x: 1.5, y: 2.25 },
+      role: 'box',
     });
-    expect(pool.calls[1]?.params).toEqual([2, 'node-2', 'basement', null, -1, 1.5, 2.25]);
+    expect(pool.calls[1]?.params).toEqual([2, 'node-2', 'basement', null, -1, 1.5, 2.25, 'box']);
+
+    await queue.close();
+  });
+
+  it('defaults role to \'house\' when omitted -- a DATA-FLOW FENCE, not a label (migration 011)', async () => {
+    const pool = new RecordingPool();
+    const queue = new DbWriteQueue(pool, { flushIntervalMs: 3_600_000 });
+
+    await queue.upsertNode({ id: 3, name: 'node-3', room: 'garage' });
+    expect(pool.calls[0]?.sql).toContain('role');
+    expect(pool.calls[0]?.params).toContain('house');
 
     await queue.close();
   });

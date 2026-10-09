@@ -248,3 +248,52 @@ describe('PgHomeCsiDb.getStatusSummary', () => {
     expect(occupancyQuery?.sql).not.toContain('now()');
   });
 });
+
+// ---------------------------------------------------------------------
+// hasOpenBoxSession: an open (ended_at IS NULL) row older than the caller's
+// maxAgeMs must NOT count as open -- an abandoned session (operator closed
+// the tab mid-take, a crash) must self-heal instead of bypassing the
+// persisted-rate ceiling / staying on LiveHub's fast poll forever. This
+// fake actually applies `started_at > $1` against a simulated row using the
+// BOUND cutoff parameter (not a fixture toggle), the same way the real SQL's
+// own predicate would, so this test genuinely exercises the age-cutoff
+// logic rather than a canned answer.
+// ---------------------------------------------------------------------
+describe('PgHomeCsiDb.hasOpenBoxSession', () => {
+  function makeBoxSessionsPool(startedAt: Date): {
+    pool: DbPool;
+    queries: Array<{ sql: string; values: readonly unknown[] }>;
+  } {
+    const queries: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const fake = {
+      async query(sql: string, values: readonly unknown[] = []): Promise<{ rows: unknown[] }> {
+        queries.push({ sql, values });
+        const cutoff = values[0] as Date;
+        return { rows: startedAt > cutoff ? [{ '?column?': 1 }] : [] };
+      },
+    };
+    return { pool: fake as unknown as DbPool, queries };
+  }
+
+  it('reports true for a fresh (recently started) open row within maxAgeMs', async () => {
+    const { pool, queries } = makeBoxSessionsPool(new Date());
+    const db = new PgHomeCsiDb(pool);
+
+    const result = await db.hasOpenBoxSession(3_600_000);
+
+    expect(result).toBe(true);
+    expect(queries[0]?.sql).toContain('ended_at IS NULL');
+    expect(queries[0]?.sql).toContain('started_at > $1');
+    expect(queries[0]?.values[0]).toBeInstanceOf(Date);
+  });
+
+  it('reports false once an open row is older than maxAgeMs, even though ended_at is still NULL', async () => {
+    const staleStartedAt = new Date(Date.now() - 2 * 3_600_000); // 2 hours ago
+    const { pool } = makeBoxSessionsPool(staleStartedAt);
+    const db = new PgHomeCsiDb(pool);
+
+    const result = await db.hasOpenBoxSession(3_600_000); // 1 hour cap
+
+    expect(result).toBe(false);
+  });
+});

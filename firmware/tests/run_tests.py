@@ -39,6 +39,7 @@ SHARED_SOURCES = [
     PROTO / "bw_budget.c",
     PROTO / "seq_epoch.c",
     PROTO / "device_token.c",
+    PROTO / "mode_policy.c",
 ]
 
 # Host-only helpers (reference crypto, doc parsing). Never built into firmware.

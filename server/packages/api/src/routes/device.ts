@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { DeviceModeStore } from '../realtime/deviceModeStore.js';
 import { parseOrThrow } from '../validate.js';
 
 /**
@@ -124,9 +125,15 @@ function resolveFirmwareFile(firmwareDir: string, file: string): string | null {
  */
 export function registerDeviceRoutes(
   app: FastifyInstance,
-  options: { firmwareDir: string; helloStore: DeviceHelloStore },
+  options: {
+    firmwareDir: string;
+    helloStore: DeviceHelloStore;
+    /** In-memory realtime control-plane state (see realtime/deviceModeStore.ts). Defaults to a fresh, never-toggled store for tests that don't care about it. */
+    deviceModeStore?: DeviceModeStore;
+  },
 ): void {
   const { firmwareDir, helloStore } = options;
+  const deviceModeStore = options.deviceModeStore ?? new DeviceModeStore();
 
   app.post('/device/hello', async (request, reply) => {
     const nodeId = request.deviceNodeId;
@@ -134,6 +141,17 @@ export function registerDeviceRoutes(
     const hello = parseOrThrow(helloBodySchema, request.body);
     helloStore.record(nodeId, hello);
     return { ok: true };
+  });
+
+  // The realtime control plane's device-facing half (docs/device-api.md):
+  // a node polls this at its own `pollIntervalS` cadence and enforces the
+  // returned `expiresAt` against its OWN local clock -- see
+  // deviceModeStore.ts's module doc comment for why in-memory-only state
+  // here is safe rather than merely convenient.
+  app.get('/device/mode', async (request, reply) => {
+    const nodeId = request.deviceNodeId;
+    if (nodeId === null) return reply.code(401).send({ error: 'unauthorized' });
+    return deviceModeStore.poll(nodeId);
   });
 
   app.get('/device/ota/manifest', async (request, reply) => {

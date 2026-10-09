@@ -11,6 +11,7 @@ idf_component_register(
         "bw_budget.c"
         "seq_epoch.c"
         "device_token.c"
+        "mode_policy.c"
     INCLUDE_DIRS "include"
 )
 

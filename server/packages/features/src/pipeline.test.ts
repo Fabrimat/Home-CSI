@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Config } from '@homecsi/config';
+import type { DbPool } from '@homecsi/db';
 import { CsiFormat } from '@homecsi/protocol';
 import {
+  createPgCsiRecordSource,
   runFeaturePipelineCore,
   type CsiRecordRow,
   type CsiRecordSource,
@@ -22,8 +24,8 @@ function baseConfig(): Config {
       pool: { min: 1, max: 1 },
     },
     nodes: [
-      { id: 1, name: 'a', room: 'r1', psk: Buffer.alloc(32).toString('base64'), floor: 0 },
-      { id: 2, name: 'b', room: 'r2', psk: Buffer.alloc(32).toString('base64'), floor: 0 },
+      { id: 1, name: 'a', room: 'r1', psk: Buffer.alloc(32).toString('base64'), floor: 0, role: 'house' },
+      { id: 2, name: 'b', room: 'r2', psk: Buffer.alloc(32).toString('base64'), floor: 0, role: 'house' },
     ],
     storage: {
       captureDir: '.',
@@ -214,5 +216,83 @@ describe('runFeaturePipelineCore', () => {
       sink: new FakeFeatureSink(),
     });
     expect(result).toEqual({ linksProcessed: 0, windowsWritten: 0, recordsDropped: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------
+// THE STRUCTURAL FENCE (brief B1): createPgCsiRecordSource's query must
+// exclude records from non-'house' nodes via a JOIN against nodes.role,
+// never a hardcoded id list -- box-experiment CSI must never reach
+// occupancy_states (docs/architecture.md's data lifecycle: it's the one
+// table kept forever). No live database is needed here -- like
+// packages/api/src/db/pgDb.test.ts's FakePool, this fake filters by
+// simulating what the real SQL's own `n.role = 'house'` predicate does
+// (a fixed clause with no bound parameter for role at all), never by a
+// fixture toggle keyed on anything the query passes in, and the test also
+// asserts the query text itself has that shape.
+// ---------------------------------------------------------------------
+describe('createPgCsiRecordSource: house/box role fence', () => {
+  it('excludes a box-role node\'s csi_records via a nodes.role JOIN; a house-role node\'s still flow through to features', async () => {
+    const nodeRoles = new Map<number, 'house' | 'box'>([
+      [1, 'house'],
+      [2, 'box'],
+    ]);
+    const rawRows: Array<{
+      time: Date;
+      node_id: number;
+      src_mac: string;
+      rssi: number;
+      csi_format: number;
+      csi_data: Buffer;
+    }> = [];
+    for (let t = 0; t <= 2000; t += 250) {
+      for (const nodeId of [1, 2]) {
+        rawRows.push({
+          time: new Date(t),
+          node_id: nodeId,
+          src_mac: `aa:aa:aa:aa:aa:0${nodeId}`,
+          rssi: -50,
+          csi_format: CsiFormat.Lltf,
+          csi_data: iqBuffer([
+            [10, 0],
+            [8, 0],
+            [6, 0],
+            [4, 0],
+          ]),
+        });
+      }
+    }
+
+    const queries: string[] = [];
+    const pool = {
+      async query(sql: string): Promise<{ rows: typeof rawRows }> {
+        queries.push(sql);
+        // Reproduces exactly what the real SQL's own `n.role = 'house'`
+        // clause does -- filters by a join against the node registry,
+        // never by a fixture toggle keyed on a bound parameter (there is
+        // no bound parameter for role at all).
+        return { rows: rawRows.filter((r) => nodeRoles.get(r.node_id) === 'house') };
+      },
+    };
+
+    const source = createPgCsiRecordSource(pool as unknown as DbPool);
+    const fetched = await source.fetchRecords(null, 10_000);
+    expect(fetched.length).toBeGreaterThan(0);
+    expect(fetched.every((r) => r.nodeId === 1)).toBe(true);
+    expect(fetched.some((r) => r.nodeId === 2)).toBe(false);
+
+    // Regression guard on the SQL's own shape: a JOIN against nodes.role,
+    // never a hardcoded node-id list.
+    expect(queries[0]).toMatch(/JOIN\s+nodes/i);
+    expect(queries[0]).toContain("role = 'house'");
+    expect(queries[0]).not.toMatch(/node_id\s+(NOT\s+)?IN\s*\(/i);
+
+    // End to end through the pipeline: box-role csi_records produce ZERO
+    // features rows; house-role csi_records still produce them normally.
+    const sink = new FakeFeatureSink();
+    const result = await runFeaturePipelineCore(baseConfig(), { source, sink });
+    expect(result.windowsWritten).toBeGreaterThan(0);
+    expect(sink.rows.every((r) => r.nodeId === 1)).toBe(true);
+    expect(sink.rows.some((r) => r.nodeId === 2)).toBe(false);
   });
 });

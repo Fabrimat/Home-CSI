@@ -33,6 +33,12 @@ esp_err_t net_uplink_start(const node_config_t *cfg, uint32_t boot_epoch);
 
 void net_uplink_get_stats(net_uplink_stats_t *out);
 
+/* Changes the batch triggers at runtime (main/mode_client.c switching
+ * between normal and server-proposed realtime rates, and back on expiry).
+ * See csi_batcher_reconfigure(): 0 leaves that knob unchanged, and a batch
+ * already in progress is never corrupted, only possibly flushed sooner. */
+void net_uplink_reconfigure_batch(uint16_t max_records, uint32_t flush_budget_ms);
+
 /* True once at least one datagram has been accepted by the socket layer.
  * Used only to pick between the "connected, no server" and "streaming" LED
  * states - there are no acks in v1, so this is best-effort by definition. */

@@ -60,6 +60,19 @@ void csi_batcher_init(csi_batcher_t *b, uint16_t max_records,
                       uint32_t flush_budget_ms);
 void csi_batcher_reset(csi_batcher_t *b);
 
+/* Changes the two S11 knobs on an already-running batcher - e.g. the
+ * burst/realtime mode client (main/mode_client.c) tightening or loosening
+ * the batch triggers at runtime. A 0 argument leaves that knob unchanged
+ * (matching csi_batcher_init()'s "0 means take the documented default" only
+ * in spirit, not literally - here 0 is never a value a clamped proposal can
+ * produce, so it just means "not specified"). Safe to call with a batch
+ * already in progress: a max_records that is now below the in-flight
+ * record_count simply makes the very next csi_batcher_flush_due() check
+ * true, which is the same "count" trigger this module already implements -
+ * nothing overflows and nothing is lost. */
+void csi_batcher_reconfigure(csi_batcher_t *b, uint16_t max_records,
+                             uint32_t flush_budget_ms);
+
 csi_batch_result_t csi_batcher_append(csi_batcher_t *b,
                                       const hcs_csi_record_t *r);
 

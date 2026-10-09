@@ -119,11 +119,16 @@ config HCS_CSI_MAX_LEN
     range 64 1103
     default 384
     help
-      UNVERIFIED HARDWARE VALUE. The ESP32 reports CSI buffers whose length
-      depends on the decoded format; 384 covers LLTF+HT-LTF at 20 MHz
-      according to public documentation, but this project has not measured
-      it. Anything longer is dropped and counted (never truncated). Run
-      firmware/bringup/csi-hello and set this from the lengths it prints.
+      UNVERIFIED HARDWARE VALUE, on every target this firmware builds for.
+      The ESP32 family reports CSI buffers whose length depends on the
+      decoded format; 384 covers LLTF+HT-LTF at 20 MHz on the classic ESP32
+      according to public documentation. On the primary target, ESP32-C6,
+      docs/hardware-esp32c6.md notes Espressif's own figures point to a
+      SHORTER typical record (~53 usable HT20 subcarriers), so 384 should
+      still be a safe ceiling there too - but "should" is not "measured" on
+      either board. Anything longer than this value is dropped and counted
+      (never truncated). Run firmware/bringup/csi-hello on your actual board
+      and set this from the `len` values it prints.
 
 config HCS_RING_SLOTS
     int "CSI ring buffer slots"
@@ -191,6 +196,87 @@ config HCS_RECONNECT_REBOOT_S
     int "Reboot if Wi-Fi has been down this long (seconds, 0 = never)"
     range 0 86400
     default 900
+
+endmenu
+
+menu "Realtime (burst) mode from GET /device/mode"
+
+comment "main/mode_client.c polls the device API for a temporary 'run hot'"
+comment "directive (docs/device-api.md, brief B1). Every ceiling below is"
+comment "enforced ON THIS NODE, independent of anything the server says -"
+comment "a server value beyond one of these is clamped to it and logged,"
+comment "never applied verbatim and never rejected outright."
+
+config HCS_MODE_POLL_MIN_INTERVAL_S
+    int "Floor on how often this node will poll /device/mode (seconds)"
+    range 1 3600
+    default 10
+    help
+      A server-proposed pollIntervalS below this is clamped up to it. Also
+      used as the bootstrap poll cadence before the first successful
+      response. Protects the device API from being hammered by a fast or
+      misconfigured poll interval; it has no bearing on how quickly a
+      realtime window ends, because that is enforced locally (see
+      HCS_REALTIME_MAX_DURATION_S below) and never depends on polling.
+
+config HCS_REALTIME_MIN_SOUNDING_INTERVAL_MS
+    int "Floor on the sounding interval (ms) while in realtime mode"
+    range 5 60000
+    default 20
+    help
+      A server-proposed soundingIntervalMs below this is clamped up to it.
+      This is the same knob as HCS_SOUNDING_INTERVAL_MS above, just with an
+      independent, tighter floor that applies only to what a server may
+      request - a buggy or hostile server can make this node sound at up to
+      50 Hz (this default), never faster, no matter what it asks for.
+
+config HCS_REALTIME_MAX_SOUNDING_RPS
+    int "Ceiling on the sounding-class record admission rate (records/s)"
+    range 1 2000
+    default 200
+    help
+      A server-proposed soundingRps above this is clamped down to it. This
+      is the realtime-mode ceiling on the same admission-rate knob as
+      HCS_BW_SOUNDING_RPS above (bw_budget.c, BW_CLASS_SOUNDING) - a buggy or
+      hostile server cannot make this node admit CSI records faster than
+      this, regardless of what it asks for.
+
+config HCS_REALTIME_MIN_FLUSH_BUDGET_MS
+    int "Floor on flush_time_budget_ms while in realtime mode"
+    range 5 10000
+    default 20
+    help
+      A server-proposed flushBudgetMs below this is clamped up to it. Too
+      low a flush budget means one UDP datagram per CSI record instead of a
+      batch - more airtime and CPU per record, for no sensing benefit.
+
+config HCS_REALTIME_MAX_RECORDS_PER_BATCH
+    int "Ceiling on max_records_per_batch while in realtime mode"
+    range 1 64
+    default 64
+    help
+      A server-proposed maxRecordsPerBatch above this is clamped down to it.
+      64 is also the hard upper bound of HCS_MAX_RECORDS_PER_BATCH above, so
+      by default this ceiling does not add a tighter limit on its own - it
+      exists so a deployment that wants a stricter realtime-only cap has
+      somewhere to set it without touching the normal-mode default.
+
+config HCS_REALTIME_MAX_DURATION_S
+    int "Ceiling on how long a single realtime (burst) window may run"
+    range 60 86400
+    default 3600
+    help
+      THE load-bearing ceiling. main/mode_client.c converts the server's
+      `expiresAt` into a deadline on this node's own esp_timer clock at the
+      moment realtime mode is applied, and the window length used is always
+      clamped to this many seconds - regardless of what expiresAt claims,
+      regardless of this node's wall clock (synced or not), and regardless
+      of whether the server answers another poll before the window ends.
+      This is what makes it impossible for a wedged experiment, or a server
+      that has gone away entirely, to leave the mesh running hot forever:
+      the node reverts to normal on its own clock no later than this many
+      seconds after it last applied a realtime directive, with no server
+      round trip required to do so.
 
 endmenu
 
@@ -269,13 +355,23 @@ choice HCS_LED_BACKEND
     prompt "Status LED backend"
     default HCS_LED_BACKEND_NONE
     help
-      THE HALOCODE'S LED HARDWARE IS UNVERIFIED BY THIS PROJECT. The board
-      is documented as having a 12-LED RGB ring, but neither the driver chip
-      nor the GPIO it hangs off has been confirmed here. The default backend
-      is therefore "none": the firmware logs its state instead of driving
-      anything, and every other subsystem works identically.
+      THIS PROJECT HAS NOT CONFIRMED THE LED HARDWARE ON EITHER BOARD IT
+      TARGETS. On the legacy Halocode (ESP32), the board is documented as
+      having a 12-LED RGB ring but neither the driver chip nor the GPIO it
+      hangs off was ever confirmed here. On the primary target, ESP32-C6,
+      the defaults below (GPIO 8, a single WS2812) are Espressif's own
+      documented value for their ESP32-C6-DevKitC-1 reference board's
+      onboard addressable LED - a real published fact, not a guess in the
+      way the old Halocode default was, but it is still unconfirmed FOR
+      YOUR SPECIFIC BOARDS: a bare module, a custom carrier PCB, or any C6
+      board that is not that exact reference design will have a different
+      pin or no onboard LED at all. The default backend is therefore still
+      "none" either way: the firmware logs its state instead of driving
+      anything, and every other subsystem works identically regardless of
+      this choice.
 
-      Once you have measured the real pin, pick a backend below.
+      Once you have confirmed the real pin for your actual boards, pick a
+      backend below.
 
 config HCS_LED_BACKEND_NONE
     bool "None (log state transitions only)"
@@ -292,16 +388,27 @@ config HCS_LED_GPIO
     int "LED data GPIO"
     depends on !HCS_LED_BACKEND_NONE
     range 0 39
-    default 25
+    default 8
     help
-      UNVERIFIED DEFAULT. 25 is a guess, not a datasheet reading. Confirm
-      with a scope or by trial before believing it.
+      Espressif's ESP32-C6-DevKitC-1 reference board wires its one onboard
+      addressable (WS2812) LED to GPIO8 - that is where this default comes
+      from, and it is correct if your C6 boards ARE that reference design.
+      If they are a different C6 board/module (or you are building for the
+      legacy esp32 target, where the old Halocode default here was 25 and
+      was never more than a guess), this is UNVERIFIED for your hardware:
+      confirm with a scope, the board's own schematic, or by trial before
+      believing it.
 
 config HCS_LED_COUNT
     int "Number of addressable LEDs"
     depends on HCS_LED_BACKEND_WS2812
     range 1 64
-    default 12
+    default 1
+    help
+      1 matches the single onboard WS2812 on Espressif's ESP32-C6-DevKitC-1
+      reference board. The legacy Halocode's documented (also unverified)
+      12-LED ring used 12 here instead - set this from what your actual
+      board has.
 
 config HCS_LED_MAX_BRIGHTNESS
     int "Maximum per-channel brightness (0-255)"

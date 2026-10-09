@@ -1,0 +1,4 @@
+# csi-hello, ESP32-C6 (primary/pinned-default target - see the common
+# sdkconfig.defaults). See ../../esp32-csi-node's
+# sdkconfig.defaults.esp32c6 for the CPU frequency reasoning - identical here.
+CONFIG_ESP32C6_DEFAULT_CPU_FREQ_160=y

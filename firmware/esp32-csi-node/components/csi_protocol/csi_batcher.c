@@ -33,6 +33,20 @@ void csi_batcher_reset(csi_batcher_t *b)
     /* records_too_large is cumulative-since-boot: deliberately not cleared. */
 }
 
+void csi_batcher_reconfigure(csi_batcher_t *b, uint16_t max_records,
+                             uint32_t flush_budget_ms)
+{
+    if (b == NULL) {
+        return;
+    }
+    if (max_records != 0u) {
+        b->max_records = max_records;
+    }
+    if (flush_budget_ms != 0u) {
+        b->flush_budget_ms = flush_budget_ms;
+    }
+}
+
 bool csi_batcher_is_empty(const csi_batcher_t *b)
 {
     return b == NULL || b->record_count == 0u;

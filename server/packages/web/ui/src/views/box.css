@@ -1,0 +1,161 @@
+/*
+ * Box experiment view (views/box.ts). Own file, imported by that view module
+ * -- style.css stays the shared baseline (panels, .controls, .badge,
+ * .chart-grid, .correction-message, the global :focus-visible ring); this
+ * file only adds what this view needs on top of it.
+ *
+ * Deliberately no rules that hide a focus ring: every control here is
+ * keyboard-reachable and style.css's `button:focus-visible` /
+ * `input:focus-visible` outline must keep applying.
+ */
+
+.box-title {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- Live strip: the centrepiece -------------------------------------- */
+
+.box-lane h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/*
+ * Same fix as `.chart-svg` (style.css, commit 92872ed): a canvas carries an
+ * INTRINSIC pixel size from its width/height attributes and does not shrink
+ * to fit a narrow grid column on its own -- `width: 100%; height: auto` (on
+ * top of `.chart-grid`'s `min-width: 0` on the card itself) makes it scale to
+ * whatever column it lands in instead of spilling into its neighbour.
+ */
+.box-lane-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  border-radius: 6px;
+}
+
+/* A lane with no link yet, or one that has gone silent, must not look like
+   an ordinary live canvas -- dimmed AND labelled, never colour alone. */
+.box-lane-canvas.box-lane-quiet {
+  opacity: 0.35;
+  filter: grayscale(60%);
+}
+
+/* ---- Realtime toggle ---------------------------------------------------- */
+
+.box-realtime-mode {
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.box-realtime-mode.mode-unknown {
+  color: var(--warn);
+}
+
+.box-realtime-mode.mode-realtime {
+  color: var(--accent);
+}
+
+.box-realtime-mode.mode-normal {
+  color: var(--ok);
+}
+
+.box-pickup-table td,
+.box-pickup-table th {
+  white-space: normal;
+}
+
+/* ---- Recording panel ---------------------------------------------------- */
+
+.box-record-toggle {
+  min-height: 3.5rem;
+  min-width: 12rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  border-radius: 10px;
+}
+
+.box-record-toggle.recording {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #1a0403;
+}
+
+/* The unmistakable "we are recording" banner: a colour alone is not a state
+   announcement, so its own text always says RECORDING and how long for --
+   this exists for an operator whose hands are in the box, not on the
+   keyboard, glancing up rather than reading closely. */
+.box-recording-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border: 2px solid var(--bad);
+  background: rgba(245, 97, 92, 0.12);
+  color: var(--bad);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  margin-bottom: 0.75rem;
+  font-weight: 700;
+  animation: box-recording-pulse 1.6s ease-in-out infinite;
+}
+
+.box-recording-dot {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 50%;
+  background: var(--bad);
+  flex: none;
+}
+
+@keyframes box-recording-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 97, 92, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(245, 97, 92, 0);
+  }
+}
+
+/* An operator who has asked the OS/browser to reduce motion gets the same
+   information without the pulse. */
+@media (prefers-reduced-motion: reduce) {
+  .box-recording-banner {
+    animation: none;
+  }
+}
+
+/* ---- Dataset readiness --------------------------------------------------- */
+
+.badge.ready {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.not-ready {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.box-confusion {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--bg-panel-raised);
+  border-radius: 6px;
+  padding: 0.6rem;
+}
+
+@media (max-width: 640px) {
+  .box-record-toggle {
+    width: 100%;
+  }
+}

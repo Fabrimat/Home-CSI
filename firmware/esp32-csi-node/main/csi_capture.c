@@ -57,7 +57,21 @@ static csi_source_class_t classify_source(const uint8_t src[6])
  * tag degrades interpretation but never desynchronises a batch - consumers
  * parse by csi_len (proto S9.2/S14). csi-hello prints sig_mode, stbc and the
  * raw length side by side so this mapping can be corrected from evidence.
- */
+ *
+ * ESP32-C6 (docs/hardware-esp32c6.md): this project has not been able to
+ * build/run against real C6 CSI callbacks (no hardware, no ESP-IDF
+ * toolchain available while writing this), so it is worth being explicit
+ * about what is and is not assumed here. The C6 is an 802.11ax (Wi-Fi 6)
+ * radio; if its driver ever reports a `sig_mode` value other than the two
+ * this function already checks (0 = non-HT, and HT via the stbc/htltf_en
+ * checks below), the existing fall-through still returns SOME already-
+ * defined tag rather than crashing or misparsing - it does not, and must
+ * not, invent a new csi_format value to represent an HE PPDU. Per
+ * CLAUDE.md and docs/protocol.md S9.3, csi_format is a two-place contract
+ * (this file and server/packages/protocol) and is out of scope to extend
+ * here; if bring-up evidence ever shows the C6 needs a genuinely new tag,
+ * that is a call for a future brief with real hardware in hand, not a
+ * guess made from a doc. */
 static uint8_t classify_format(const wifi_pkt_rx_ctrl_t *rx)
 {
     if (rx->sig_mode == 0) {
@@ -99,7 +113,43 @@ static void csi_rx_cb(void *ctx, wifi_csi_info_t *info)
         return;
     }
 
-    const uint16_t csi_len = (uint16_t)info->len;
+    /*
+     * first_word_invalid: the ESP32 Wi-Fi driver can report a CSI buffer
+     * whose first 4 bytes (one I/Q sample "word") are not valid channel
+     * data - a documented quirk on the classic ESP32 and, per
+     * docs/hardware-esp32c6.md, also observed on later variants including
+     * the C6. Skip exactly those leading bytes here, at the callback,
+     * rather than passing the flag downstream for someone else to handle:
+     *
+     *   - every consumer of csi_data parses strictly by csi_len (proto
+     *     S9.2/S14; the server's csiParsing.ts derives subcarrier count from
+     *     length alone, never from csi_format or any assumed constant), so
+     *     shrinking csi_len to cover only the bytes actually kept is safe by
+     *     construction - it can never desynchronise a batch, it just means
+     *     this one record's csi_len is 4 bytes shorter than the driver's raw
+     *     info->len;
+     *   - the alternative (zeroing the 4 bytes instead of dropping them)
+     *     would silently inject fabricated "valid-looking" samples into an
+     *     amplitude-first pipeline, which is worse than a shorter but
+     *     entirely genuine record.
+     *
+     * Counted in csi_capture_stats_t.first_word_invalid either way, so a
+     * fleet-wide rate of this can be seen without a serial cable. */
+    const uint8_t *csi_bytes = (const uint8_t *)info->buf;
+    uint16_t csi_len = (uint16_t)info->len;
+    if (info->first_word_invalid) {
+        s_stats.first_word_invalid++;
+        if (csi_len > 4u) {
+            csi_bytes += 4;
+            csi_len -= 4u;
+        } else {
+            /* Nothing valid survives a 4-byte trim of a record this short;
+             * deliver nothing rather than a near-empty, meaningless one. */
+            s_stats.dropped_invalid++;
+            return;
+        }
+    }
+
     const uint32_t wire_bytes = (uint32_t)HCS_RECORD_FIXED_LEN + csi_len;
     const bw_class_t bw_class = (src_class == CSI_SOURCE_FOREIGN)
                                     ? BW_CLASS_FOREIGN
@@ -136,8 +186,10 @@ static void csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     meta.source_class = (uint8_t)src_class;
 
     /* The only expensive thing the callback does, and it is a bounded memcpy
-     * into pre-allocated storage. Then return immediately. */
-    if (!csi_ring_push(&s_ring, &meta, (const uint8_t *)info->buf, csi_len)) {
+     * into pre-allocated storage. Then return immediately. csi_bytes/csi_len
+     * are the (possibly first_word_invalid-trimmed) view computed above -
+     * never info->buf/info->len directly. */
+    if (!csi_ring_push(&s_ring, &meta, csi_bytes, csi_len)) {
         s_stats.dropped_ring++;
         return;
     }
@@ -161,6 +213,20 @@ esp_err_t csi_capture_start(const node_config_t *cfg)
              (unsigned)CONFIG_HCS_RING_SLOTS, (unsigned)CSI_RING_MAX_CSI_LEN,
              (unsigned)sizeof(s_slots));
 
+#if CONFIG_IDF_TARGET_ESP32C6
+    /* Espressif's own esp-csi project configures ESP32/C3/S3/C6 CSI through
+     * this same wifi_csi_config_t shape (lltf_en/htltf_en/stbc_htltf2_en/
+     * ltf_merge_en/channel_filter_en/manu_scale/shift), so the fields below
+     * are used identically on the C6. That said: this project has not had
+     * an ESP-IDF toolchain or a C6 board available while writing this, so
+     * that equivalence has not been build-verified here. If `idf.py build`
+     * on esp32c6 reports one of these fields as unknown, that is the
+     * target/IDF-version rename to go fix (see firmware/bringup/README.md
+     * and docs/hardware-esp32c6.md), not a design decision made blind. */
+    ESP_LOGI(TAG, "target: esp32c6 - CSI config fields below are assumed "
+                  "identical to the classic ESP32 API; not build-verified "
+                  "by this project (see docs/hardware-esp32c6.md)");
+#endif
     memset(&s_csi_cfg, 0, sizeof s_csi_cfg);
     /* Keep both LLTF and HT-LTF: the extra subcarriers materially improve
      * motion sensitivity, and the record is self-describing (csi_format +
@@ -226,10 +292,19 @@ uint32_t csi_capture_frames_dropped(void)
     /* Everything the node saw but will not deliver, for any reason. The
      * batcher's "too large to ever fit" drops are added by net_uplink. */
     return s_stats.dropped_rssi + s_stats.dropped_notallow
-           + s_stats.dropped_budget + s_stats.dropped_ring;
+           + s_stats.dropped_budget + s_stats.dropped_ring
+           + s_stats.dropped_invalid;
 }
 
 const bw_budget_t *csi_capture_budget(void)
 {
     return &s_budget;
+}
+
+void csi_capture_reconfigure_bw(const bw_budget_cfg_t *cfg)
+{
+    if (cfg == NULL) {
+        return;
+    }
+    bw_budget_reconfigure(&s_budget, cfg, (uint64_t)esp_timer_get_time());
 }

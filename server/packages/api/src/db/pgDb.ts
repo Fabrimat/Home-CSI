@@ -155,8 +155,9 @@ export class PgHomeCsiDb implements HomeCsiDb {
       floor: number;
       pos_x: number | null;
       pos_y: number | null;
+      role: string;
     }>(
-      `SELECT n.id, n.name, n.room, n.expected_mac, n.created_at, n.floor, n.pos_x, n.pos_y,
+      `SELECT n.id, n.name, n.room, n.expected_mac, n.created_at, n.floor, n.pos_x, n.pos_y, n.role,
               hb.time AS last_heartbeat_at,
               csi.time AS last_csi_record_at
        FROM nodes n
@@ -180,6 +181,8 @@ export class PgHomeCsiDb implements HomeCsiDb {
       floor: row.floor,
       // NULL means "not placed" (migration 010) -- never fabricate (0, 0).
       position: row.pos_x !== null && row.pos_y !== null ? { x: row.pos_x, y: row.pos_y } : null,
+      // CHECK-constrained to exactly these two values by migration 011.
+      role: row.role as 'house' | 'box',
     }));
   }
 
@@ -825,5 +828,21 @@ export class PgHomeCsiDb implements HomeCsiDb {
       sampleCount: Number(row.sample_count),
       lastSeenAt: row.last_seen_at.toISOString(),
     }));
+  }
+
+  /**
+   * Same open-row-plus-age-cutoff predicate as @homecsi/ingest's
+   * box_sessions poll (persistedRateLimiter.ts's createBoxSessionGate) --
+   * see HomeCsiDb.hasOpenBoxSession's doc comment for why the age cutoff
+   * exists at all (an abandoned session must self-heal, not stay "open"
+   * forever).
+   */
+  async hasOpenBoxSession(maxAgeMs: number): Promise<boolean> {
+    const cutoff = new Date(Date.now() - maxAgeMs);
+    const result = await this.pool.query(
+      'SELECT 1 FROM box_sessions WHERE ended_at IS NULL AND started_at > $1 LIMIT 1',
+      [cutoff],
+    );
+    return result.rows.length > 0;
   }
 }

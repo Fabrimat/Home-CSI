@@ -1,7 +1,20 @@
 # csi-hello: the smallest possible configuration that can produce CSI.
-CONFIG_IDF_TARGET="esp32"
+#
+# Common to every target. ESP-IDF merges this with exactly one of
+# sdkconfig.defaults.esp32c6 / sdkconfig.defaults.esp32, depending on the
+# resolved target - esp32c6 is the primary target (see
+# firmware/esp32-csi-node's own sdkconfig.defaults for why), esp32 stays
+# available for legacy Halocode boards.
 
-# Without this, esp_wifi_set_csi() fails and nothing else matters.
+# PINNED DEFAULT TARGET, same reasoning as firmware/esp32-csi-node's own
+# sdkconfig.defaults: without this, a fresh checkout with no prior
+# `set-target` and no `IDF_TARGET` env var falls back to ESP-IDF's own
+# built-in default of plain esp32, not this project's primary target.
+# `idf.py set-target esp32` still overrides this for a legacy Halocode board.
+CONFIG_IDF_TARGET="esp32c6"
+
+# Without this, esp_wifi_set_csi() fails and nothing else matters. Same
+# symbol name on every Wi-Fi-capable ESP-IDF target.
 CONFIG_ESP_WIFI_CSI_ENABLED=y
 
 # Power save destroys CSI regularity. Off here too, for the same reason as in

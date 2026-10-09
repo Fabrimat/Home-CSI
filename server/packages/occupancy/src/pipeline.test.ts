@@ -33,6 +33,7 @@ function configWithNodes(nodeCount: number): Config {
       room: `room-${i + 1}`,
       psk: Buffer.alloc(32).toString('base64'),
       floor: 0,
+      role: 'house' as const,
     })),
     storage: {
       captureDir: '.',

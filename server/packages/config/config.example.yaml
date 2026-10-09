@@ -48,6 +48,13 @@ database:
 # — e.g. tape-measure from one corner of that floor's plan, or from one
 # node you designate as that floor's (0, 0). Different floors do not need
 # to share an origin.
+#
+# `role` is a DATA-FLOW FENCE, not a label (defaults to "house" when
+# omitted): "box" marks one of the box-experiment ESP32-C6 nodes wired
+# around a closed box for hand-presence/gesture work, whose CSI must never
+# reach the house occupancy pipeline (see src/schema.ts's `nodeRoleSchema`
+# comment). Leave every house node's `role` unset (or "house") unless
+# you're actually wiring up box-experiment hardware.
 nodes:
   - id: 1
     name: "node-living-room"
@@ -158,3 +165,36 @@ ota:
   # An operator drops a new manifest.json + image in here to stage a
   # rollout; no server restart required (docs/device-api.md).
   firmwareDir: "../data/firmware"
+
+# Optional. Backs two things (docs/device-api.md): the always-on,
+# mode-independent ceiling on how fast @homecsi/ingest writes any one
+# (node, link) pair's CSI records to the database, and the realtime
+# control plane (GET /device/mode, GET|POST /api/realtime) that lets an
+# operator temporarily intensify a node's sounding rate for a box-experiment
+# recording take. Like `training`/`ota` above, omitting this whole section
+# is NOT a startup error -- the values shown below are the built-in
+# defaults. Requires an `ingest`/`serve` restart to take effect (this is
+# read once at startup, not re-read live).
+realtime:
+  persistedRateCeiling:
+    recordsPerSec: 50
+    burstRecords: 200
+  device:
+    normal:
+      pollIntervalS: 60
+      soundingIntervalMs: 100
+      soundingRps: 50
+      flushBudgetMs: 200
+      maxRecordsPerBatch: 16
+    realtime:
+      pollIntervalS: 10
+      soundingIntervalMs: 20
+      soundingRps: 200
+      flushBudgetMs: 50
+      maxRecordsPerBatch: 64
+    defaultDurationS: 600 # applied when POST /api/realtime omits durationS
+    maxDurationS: 3600 # POST /api/realtime rejects any durationS above this
+  liveView:
+    # How fast the dashboard's live `csi` WebSocket channel polls while a
+    # box_sessions row is open (packages/api/src/live/hub.ts).
+    burstPollIntervalMs: 150

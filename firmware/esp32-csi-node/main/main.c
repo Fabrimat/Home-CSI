@@ -13,11 +13,15 @@
  *   7. time_sync         - non-blocking; capture never waits for it
  *   8. sounding          - broadcast mesh transmitter
  *   9. net_uplink        - consumer task; owns the shared seq counter
- *  10. ota              - LAST, on purpose. It is the only optional
+ *  10. ota              - LAST-but-one, on purpose. It is an optional
  *                          subsystem, and its post-update health checkpoint
  *                          waits for (9) to have sent a heartbeat, so
  *                          starting it any earlier would only block sooner
- *  11. supervisor loop   - this task; feeds the WDT and applies the recovery
+ *  11. mode_client       - LAST. Also optional (same api_base gate as OTA),
+ *                          and it only ever reconfigures (8)/(9)/csi_capture
+ *                          at runtime - nothing later in startup depends on
+ *                          it having run
+ *  12. supervisor loop   - this task; feeds the WDT and applies the recovery
  *                          policy below
  *
  * ============================ RECOVERY POLICY ============================
@@ -64,6 +68,7 @@
 #include "crypto.h"
 #include "csi_capture.h"
 #include "heartbeat.h"
+#include "mode_client.h"
 #include "net_uplink.h"
 #include "node_config.h"
 #include "ota.h"
@@ -217,8 +222,13 @@ void app_main(void)
      * api_base is missing. */
     (void)ota_start(&s_cfg);
 
+    /* 11 - same posture as OTA: optional, gated on the same api_base, never
+     * a reason to refuse to run. mode_client_start() logs its own reason if
+     * api_base is missing. */
+    (void)mode_client_start(&s_cfg);
+
     ESP_LOGI(TAG, "startup complete; supervisor running");
 
-    /* 11 */
+    /* 12 */
     supervisor_loop();
 }

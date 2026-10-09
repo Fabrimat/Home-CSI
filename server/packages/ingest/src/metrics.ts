@@ -16,7 +16,16 @@ export type RejectReason =
   | 'stale_epoch'
   | 'too_old'
   | 'duplicate'
-  | 'malformed_payload';
+  | 'malformed_payload'
+  // Not a decode/verify rejection like the reasons above -- this datagram
+  // was fully accepted (already counted in `accepted`) and its CSI
+  // record(s) reached CaptureWriter untouched; this counts individual CSI
+  // records dropped from the DbWriteQueue path ONLY by the per-(node_id,
+  // link_mac) persisted-rate ceiling (see persistedRateLimiter.ts). Never
+  // applied to heartbeats, and never applied at all to a role='box' node's
+  // records while a box_sessions row is open (see engine.ts's admission
+  // check).
+  | 'persisted_rate_limited';
 
 export const REJECT_REASONS: readonly RejectReason[] = [
   'oversized',
@@ -31,6 +40,7 @@ export const REJECT_REASONS: readonly RejectReason[] = [
   'too_old',
   'duplicate',
   'malformed_payload',
+  'persisted_rate_limited',
 ];
 
 export interface PerNodeMetrics {

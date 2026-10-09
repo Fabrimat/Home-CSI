@@ -471,3 +471,44 @@ for client-side consumption — deferred until the UX and query patterns are
 clearer. The labeling and training infrastructure (`@homecsi/labeling`, brief
 B4) already handles persistence to the database and feature preservation; the
 dashboard is the human interface atop that.
+
+## Box experiment: what's deliberately left for later
+
+The box experiment (`docs/box-experiment.md`) ships as an offline/CLI-only
+recreational classifier in v1 — `homecsi box train` runs a leave-one-take-
+out k-NN over preserved takes and prints a report; nothing in the dashboard
+runs inference. Three things this deliberately leaves for later:
+
+- **Live per-take inference in the dashboard.** The "Box experiment" view
+  (`views/box.ts`) records takes, shows a live per-box-node CSI strip while
+  recording, and lists takes and dataset readiness — it does not run the
+  trained classifier against a take and show a predicted gesture label in
+  the browser. That would mean shipping a trained model (or a live
+  feature-extraction-plus-inference path) into the long-running API/web
+  process, which `homecsi box train`'s CLI-only, run-when-you-ask-for-it
+  design deliberately avoids for now: there is no retraining/versioning/
+  staleness story yet for a model living inside a server process. Worth
+  doing once the offline classifier is stable enough that "does this match
+  what I expect" is a question worth answering interactively.
+- **Feature-set iteration beyond the current statistical vector.**
+  `box_take_records` (migration 012) exists specifically so this is
+  possible without re-recording anything: it preserves raw CSI, not a
+  computed feature vector, precisely so a different subcarrier selection, a
+  different windowing choice, or a feature the current implementation
+  didn't think of can be tried against every take ever recorded.
+  `@homecsi/box`'s train-time feature extraction (reusing
+  `@homecsi/features`'s `parseCsiAmplitudes`/`computeWindowFeature`) is v1's
+  one feature set, not the last one that will ever be tried.
+- **The person-identification goal, honestly framed.** A natural next
+  question once gesture classification works at all is "can it tell *whose*
+  hand this is" — and `docs/box-experiment.md`'s own capability ranking
+  already places this **at or past the limit of five single-antenna (SISO)
+  2.4 GHz nodes**: no angle-of-arrival, no MIMO, and (same as the whole
+  house pipeline) no usable phase. If a future `box train` run against a
+  person-identity label comes back only barely above the random-chance
+  baseline the report is required to always show alongside accuracy, that
+  would be the honest, expected result for a hard-to-resolve distinction at
+  this hardware's limit — **a fun result worth writing down, not a finding
+  to build a person-identification feature on.** Nothing about this
+  hardware changes that ceiling; only a different radio (multi-antenna,
+  angle-of-arrival-capable) would, and none is planned.

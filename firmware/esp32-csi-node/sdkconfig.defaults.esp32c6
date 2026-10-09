@@ -1,0 +1,22 @@
+# sdkconfig.defaults.esp32c6 - settings specific to the PRIMARY target.
+#
+# ESP-IDF applies this automatically, on top of sdkconfig.defaults, whenever the
+# resolved target is esp32c6 - which is the pinned default in the common
+# sdkconfig.defaults, so a plain `idf.py build` on a fresh checkout gets here
+# without an explicit `idf.py set-target esp32c6` too. See docs/hardware-esp32c6.md
+# for what is measured versus assumed about this board; nothing here asserts
+# a fact that document does not already back up.
+#
+# NOT build-verified: no ESP-IDF toolchain or ESP32-C6 hardware was available
+# while writing this. If `idf.py build --target esp32c6` reports one of these
+# symbols as unknown, that is an IDF-version rename to fix (ESP32-C6 support
+# landed in ESP-IDF v5.1+; make sure the toolchain version actually supports
+# this target at all), not a design decision made blind.
+
+# CPU frequency: the RISC-V single-core ESP32-C6's documented maximum is
+# 160 MHz (versus the dual-core Xtensa classic ESP32's 240 MHz - see the
+# esp32 sdkconfig.defaults.esp32 file). This is the highest headroom this
+# target can give the crypto/batching/uplink path without overclocking
+# outside Espressif's spec, which matters more here than on the dual-core
+# ESP32 because there is no second core to offload housekeeping onto.
+CONFIG_ESP32C6_DEFAULT_CPU_FREQ_160=y

@@ -98,6 +98,35 @@ void bw_budget_default_cfg(bw_budget_cfg_t *cfg);
 void bw_budget_init(bw_budget_t *b, const bw_budget_cfg_t *cfg,
                     uint64_t now_us);
 
+/* Replaces the live config of an already-initialised budget - e.g. the
+ * burst/realtime mode client (main/mode_client.c) switching a running
+ * node between its normal and its server-proposed (Kconfig-ceilinged)
+ * rates, and back again on expiry.
+ *
+ * Unlike bw_budget_init(), this does NOT refill the buckets to full: doing
+ * so would let a reconfigure boundary itself grant a free burst up to
+ * whatever the new cap is, on top of whatever was already accumulated.
+ * Instead:
+ *   1. the OLD config's buckets are refilled up to `now_us` first, so no
+ *      elapsed time is lost or double-counted across the boundary;
+ *   2. the new config is installed;
+ *   3. any bucket whose current token count now exceeds ITS NEW cap is
+ *      clamped down to that cap (tightening never grants more headroom than
+ *      the new config allows); a bucket below its new cap keeps exactly the
+ *      tokens it already had (loosening does not top it up for free).
+ * The net effect: no more than the configured rate gets through across a
+ * reconfigure in either direction, in either direction of the change.
+ *
+ * Cumulative counters (admitted/dropped/decim_counter) are left untouched -
+ * they are diagnostics for the life of the boot, not enforcement state, and
+ * zeroing them on every mode change would make the heartbeat drop breakdown
+ * lie about history.
+ *
+ * Integer-only, allocation-free - safe to call from the same low-priority
+ * task that polls the mode server, not from the CSI callback itself. */
+void bw_budget_reconfigure(bw_budget_t *b, const bw_budget_cfg_t *cfg,
+                           uint64_t now_us);
+
 /* Decide whether to keep one captured record.
  *   wire_bytes  - HCS_RECORD_FIXED_LEN + csi_len, i.e. what it will cost.
  *   now_us      - monotonic microseconds (esp_timer_get_time()).

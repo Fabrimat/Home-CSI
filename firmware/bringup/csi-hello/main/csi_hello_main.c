@@ -18,11 +18,35 @@
  *                                         hardware. Use them to set
  *                                         CONFIG_HCS_CSI_MAX_LEN in the main
  *                                         firmware instead of guessing.
- *   - `sig=0` vs `sig=1`               => non-HT vs HT frames; the main
- *                                         firmware's csi_format mapping is
- *                                         derived from exactly these fields.
+ *   - `sig=0` vs `sig=1`, `stbc`       => non-HT vs HT frames, and whether
+ *                                         STBC was in use; the main
+ *                                         firmware's csi_format mapping
+ *                                         (classify_format() in
+ *                                         csi_capture.c) is derived from
+ *                                         exactly these fields.
+ *   - `rate`                          => the raw PHY rate index. On the
+ *                                         ESP32-C6 in particular, a value
+ *                                         outside what non-HT/HT frames
+ *                                         normally report is the evidence
+ *                                         that an 802.11ax/HE frame reached
+ *                                         the CSI callback - see
+ *                                         docs/hardware-esp32c6.md and the
+ *                                         comment on classify_format().
+ *   - `fwi`                           => wifi_csi_info_t.first_word_invalid.
+ *                                         Nonzero here on a real capture is
+ *                                         what justifies the 4-byte trim in
+ *                                         csi_capture.c's csi_rx_cb(); if it
+ *                                         is always 0 on your board/IDF
+ *                                         version, that handling is simply
+ *                                         inert, not wrong.
  *   - amplitudes changing when you     => the board is actually sensing the
  *     wave your hand in front of it       room, not just receiving packets.
+ *
+ *   ESP32-C6 ADDENDUM: run this exact procedure against a C6 board (esp32c6
+ *   is the pinned default target - no `set-target` needed) to convert
+ *   docs/hardware-esp32c6.md's assumed values into measured ones - see
+ *   "Step 6 (ESP32-C6 addendum)" in firmware/bringup/README.md for exactly
+ *   what to copy from this output into which Kconfig value or doc field.
  */
 
 #include <math.h>
@@ -76,16 +100,26 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info)
     }
     amps[off > 0 ? off - 1 : 0] = '\0';
 
+    /* Everything the bring-up procedure (firmware/bringup/README.md, "Step 6
+     * (ESP32-C6 addendum)") asks the operator to read off and copy into
+     * Kconfig/docs/hardware-esp32c6.md: raw `len` (-> CONFIG_HCS_CSI_MAX_LEN),
+     * `sig`/`stbc` (-> classify_format()'s mapping in csi_capture.c), `rate`
+     * (a PHY rate index outside what non-HT/HT frames use is the signal that
+     * an 802.11ax/HE frame reached the CSI callback at all), and `fwi`
+     * (first_word_invalid - if this is ever 0 on your board/IDF version,
+     * csi_capture.c's trim-4-bytes handling is simply inert, which is safe,
+     * not wrong). */
     printf("[%10lld us] src=%02x:%02x:%02x:%02x:%02x:%02x rssi=%4d ch=%2u "
-           "sig=%u mcs=%2u bw=%u sec=%u stbc=%u noise=%4d len=%4d amp[0..%d]="
-           "%s  (cb=%u printed=%u)\n",
+           "sig=%u rate=%3u mcs=%2u bw=%u sec=%u stbc=%u fwi=%u noise=%4d "
+           "len=%4d amp[0..%d]=%s  (cb=%u printed=%u)\n",
            (long long)esp_timer_get_time(), info->mac[0], info->mac[1],
            info->mac[2], info->mac[3], info->mac[4], info->mac[5],
            (int)rx->rssi, (unsigned)rx->channel, (unsigned)rx->sig_mode,
-           (unsigned)rx->mcs, (unsigned)rx->cwb,
+           (unsigned)rx->rate, (unsigned)rx->mcs, (unsigned)rx->cwb,
            (unsigned)rx->secondary_channel, (unsigned)rx->stbc,
-           (int)rx->noise_floor, (int)info->len, want - 1, amps,
-           (unsigned)s_callbacks, (unsigned)s_printed);
+           (unsigned)info->first_word_invalid, (int)rx->noise_floor,
+           (int)info->len, want - 1, amps, (unsigned)s_callbacks,
+           (unsigned)s_printed);
 }
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id,

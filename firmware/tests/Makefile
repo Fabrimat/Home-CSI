@@ -27,7 +27,8 @@ SHARED   = $(PROTO)/csi_codec.c \
            $(PROTO)/csi_batcher.c \
            $(PROTO)/bw_budget.c \
            $(PROTO)/seq_epoch.c \
-           $(PROTO)/device_token.c
+           $(PROTO)/device_token.c \
+           $(PROTO)/mode_policy.c
 
 SUPPORT  = support/ref_chacha20poly1305.c \
            support/ref_hmac_sha256.c

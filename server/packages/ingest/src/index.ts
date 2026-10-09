@@ -6,11 +6,24 @@ import { createIngestEngine, type IngestDeps, type IngestEngine } from './engine
 import { createLogger, type Logger } from './logger.js';
 import { createEmptyMetrics, type IngestMetrics } from './metrics.js';
 import { startMetricsSnapshotLoop } from './metricsSnapshotLoop.js';
+import { createBoxSessionGate } from './persistedRateLimiter.js';
 
 export { createIngestEngine } from './engine.js';
 export type { IngestEngine, IngestDeps, CaptureWriterLike, DbWriteQueueLike } from './engine.js';
 export type { IngestMetrics, PerNodeMetrics, RejectReason } from './metrics.js';
 export { flattenMetrics } from './metricsSnapshotLoop.js';
+export {
+  PersistedRateLimiter,
+  DEFAULT_PERSISTED_RATE_CEILING,
+  DEFAULT_MAX_BOX_SESSION_AGE_MS,
+  createBoxSessionGate,
+} from './persistedRateLimiter.js';
+export type {
+  BoxSessionGateLike,
+  BoxSessionGateOptions,
+  PersistedRateCeilingConfig,
+  PersistedRateLimiterLike,
+} from './persistedRateLimiter.js';
 
 let currentEngine: IngestEngine | undefined;
 
@@ -66,7 +79,21 @@ async function buildDeps(config: Config, logger: Logger): Promise<{ deps: Ingest
 export async function runIngest(config: Config): Promise<void> {
   const logger = createLogger(config);
   const { deps, pool, captureWriter } = await buildDeps(config, logger);
-  const engine = createIngestEngine(config, deps);
+  // Roughly once a second (per this brief), so a box-role node's records
+  // bypass the persisted-rate ceiling for the whole duration of a
+  // recording take, not just at the instant it opened -- see
+  // persistedRateLimiter.ts's own doc comment. `maxOpenAgeMs` reuses
+  // config.realtime's own realtime-duration cap (converted to ms) so an
+  // abandoned session self-heals into "closed" instead of bypassing the
+  // ceiling forever; omitted entirely when config.realtime is omitted,
+  // letting createBoxSessionGate's own built-in default apply.
+  const boxSessionGate = createBoxSessionGate(pool, logger, {
+    maxOpenAgeMs:
+      config.realtime?.device.maxDurationS !== undefined
+        ? config.realtime.device.maxDurationS * 1000
+        : undefined,
+  });
+  const engine = createIngestEngine(config, { ...deps, boxSessionGate });
   currentEngine = engine;
 
   const stopMetricsSnapshotLoop = startMetricsSnapshotLoop(
@@ -103,6 +130,7 @@ export async function runIngest(config: Config): Promise<void> {
         logger.info({ signal }, 'ingest shutting down');
         socket.close();
         stopMetricsSnapshotLoop();
+        boxSessionGate.stop();
         await engine.close();
         await captureWriter.close();
         await pool.end().catch(() => undefined);

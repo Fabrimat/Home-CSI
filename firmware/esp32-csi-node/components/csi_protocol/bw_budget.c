@@ -171,6 +171,49 @@ bw_decision_t bw_budget_admit(bw_budget_t *b, bw_class_t cls,
     return BW_ADMIT;
 }
 
+static void bucket_reconfigure(bw_bucket_t *bk, uint32_t rate_per_sec,
+                               uint32_t burst)
+{
+    bk->rate_per_sec = rate_per_sec;
+    const uint32_t depth = (burst != 0u) ? burst : rate_per_sec;
+    bk->cap_milli = (uint64_t)depth * MILLI;
+    /* Tighten, never loosen: a bucket already holding more than the new cap
+     * allows is clamped down to it; one holding less keeps what it has.
+     * last_us is left as bucket_refill() already advanced it above, so no
+     * elapsed time is lost or double-counted at the boundary. */
+    if (bk->tokens_milli > bk->cap_milli) {
+        bk->tokens_milli = bk->cap_milli;
+    }
+}
+
+void bw_budget_reconfigure(bw_budget_t *b, const bw_budget_cfg_t *cfg,
+                           uint64_t now_us)
+{
+    if (b == NULL || cfg == NULL) {
+        return;
+    }
+
+    /* Settle the OLD config's buckets up to `now_us` first - see the header
+     * comment for why this has to happen before the config is replaced. */
+    for (int i = 0; i < BW_CLASS_COUNT; i++) {
+        bucket_refill(&b->rec_bucket[i], now_us);
+    }
+    bucket_refill(&b->byte_bucket, now_us);
+
+    bw_budget_cfg_t new_cfg = *cfg;
+    if (new_cfg.decimate_max_divisor == 0u) {
+        new_cfg.decimate_max_divisor = 1u;
+    }
+    b->cfg = new_cfg;
+
+    for (int i = 0; i < BW_CLASS_COUNT; i++) {
+        bucket_reconfigure(&b->rec_bucket[i], new_cfg.cls[i].records_per_sec,
+                           new_cfg.cls[i].burst_records);
+    }
+    bucket_reconfigure(&b->byte_bucket, new_cfg.bytes_per_sec,
+                       new_cfg.burst_bytes);
+}
+
 uint32_t bw_budget_total_dropped(const bw_budget_t *b)
 {
     if (b == NULL) {

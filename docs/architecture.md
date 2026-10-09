@@ -42,11 +42,20 @@ Home                                                VPS (public IP)
                                                      +-----------------------------------------------+
 ```
 
-Nodes are custom-firmware ESP32 boards (Makeblock Halocode, see
-`docs/hardware-halocode.md`). They associate as Wi-Fi stations to a
-**dedicated spare consumer router** running as an independent AP, separate
-from the household's normal Wi-Fi. Traffic from nodes to the server crosses
-the open Internet over UDP with no VPN in v1 (see Security posture below).
+Nodes are custom-firmware ESP32 boards. The fleet's **primary target is now
+the ESP32-C6** (see `docs/hardware-esp32c6.md`); the project's original
+board, the Makeblock Halocode (a classic ESP32), is kept buildable and
+documented as a **legacy/secondary** target (`docs/hardware-halocode.md`)
+for whatever units remain in service. Both boards associate as Wi-Fi
+stations to a **dedicated spare consumer router** running as an independent
+AP, separate from the household's normal Wi-Fi. Traffic from nodes to the
+server crosses the open Internet over UDP with no VPN in v1 (see Security
+posture below).
+
+The diagram above deliberately omits the box-experiment nodes (see "The box
+experiment" below): they talk to the same ingest and the same database, but
+are fenced out of the `features`/`occupancy` boxes shown here at the query
+layer, not by any separate wire path worth drawing.
 
 ## Radio design
 
@@ -89,7 +98,10 @@ soundings rather than unicast pings between fixed pairs of nodes.
 
 ## Honest capability statement: 2.4 GHz only
 
-The ESP32 radios in this project are **802.11n, 2.4 GHz only** -- they
+The ESP32 radios in this project -- **802.11n on the legacy Halocode
+boards, 802.11ax (Wi-Fi 6) on the now-primary ESP32-C6** -- are, either way,
+**2.4 GHz only** (`docs/hardware-esp32c6.md` confirms the C6's radio has no
+5 GHz capability at all, same as the classic ESP32's). They
 cannot decode 5 GHz or 6 GHz frames at all, and most modern smartphones,
 laptops, TVs, and smart speakers negotiate 5 GHz or WiFi 6/6E whenever it's
 available. That means **passive sniffing of a household's existing devices
@@ -127,6 +139,67 @@ antenna count. Consequently:
   physically separated (e.g. one person moving in the kitchen while another
   moves upstairs), inferred from *which* links show motion at the same
   time, not from the amplitude of any single link.
+
+## The box experiment: a fenced-off second subsystem
+
+A second, deliberately unrelated subsystem shares this project's hardware
+and ingest path: five ESP32-C6 nodes sit around a closed box, and an
+operator records short gesture "takes" to train a recreational k-NN
+classifier offline. `docs/box-experiment.md` has the full framing, the
+honest capability bounds, and why a per-window classifier is legitimate
+there and forbidden for house occupancy -- this section covers only the
+structural fence and where it sits in this system's data flow, not the
+physics or the ML; read that doc rather than expecting either restated
+here.
+
+**Why it needs a fence at all.** A hand waved near the box produces exactly
+the kind of motion transition the latched state machine above is built to
+detect and integrate -- and it has nothing to do with anyone being home. If
+box-experiment CSI reached the same `features`/occupancy pipeline as the
+house mesh, it would latch `occupancy_states` -- the one table this project
+keeps forever, with no retention policy at all (see Data lifecycle below)
+-- on gestures that carry no occupancy information whatsoever, permanently
+corrupting the one record this whole project exists to produce.
+
+**The fence is structural, not a convention.** `nodes.role` (`'house'` or
+`'box'`, migration 011, CHECK-constrained, defaulting to `'house'` so an
+unannotated node is fenced *in*, never silently fenced out) tags every node
+at the schema level. `@homecsi/features`'s own `csi_records` query
+(`packages/features/src/pipeline.ts`'s `createPgCsiRecordSource`) joins
+against `nodes` and filters to `role = 'house'` -- the single choke point
+that keeps box CSI out of `features`, and therefore out of everything
+downstream of it, since occupancy reads only `features`. An ESLint
+`no-restricted-imports` rule additionally bans `@homecsi/features` and
+`@homecsi/occupancy` from importing `@homecsi/box` at all, so there is no
+code path by which box-package logic could reach the house pipeline even if
+a future change tried. See `docs/box-experiment.md` "The structural fence"
+for the full picture, including the read-side mirror (`@homecsi/box` only
+ever reads `role = 'box'` rows, so a take can never contain house-node CSI
+either). Note that the filter selects on the *observing* node and not on the
+source MAC -- a house node that hears a box node's sounding still produces an
+ordinary house link, which is correct rather than a leak; see
+`docs/box-experiment.md` "What the filter selects on is the *observer*" for
+why, and for the rate and fresh-link-baseline consequences.
+
+**Why a per-window classifier is legitimate there.** The box classifier
+answers "which of a small, fixed hand-gesture vocabulary was closest to the
+box just now", evaluated against ground truth the operator supplied by
+performing the gesture themselves -- not "how many people are in the
+house", which is exactly the claim "Motion, not people" above rules out for
+a single CSI window. Same radios, same amplitude-first pipeline, same
+noise -- a different, much narrower question being asked of it. That is
+what makes the technique honest here and dishonest for house occupancy: the
+claim being made, not the math. See `docs/box-experiment.md` for what this
+hardware can and cannot resolve at close range; it is not restated here.
+
+**Airtime is shared, not free.** Box nodes are not a separate radio: they
+share the one fixed 2.4 GHz channel (see Radio design above) with the house
+mesh. A box take's dense CSI burst (see Data lifecycle below) therefore
+consumes real airtime on that shared channel, and the house mesh's own CSI
+cadence may visibly jitter for the few seconds a take is open. This is a
+real, bounded, known cost of running the experiment, not a hidden one -- see
+`docs/box-experiment.md` "Realtime mode and airtime" for the operational
+detail.
 
 ## Amplitude-first
 
@@ -202,13 +275,42 @@ accidental side effect of however long raw data happens to survive.
    storage**: `config.storage.retention` (enforced by `packages/storage`'s
    `pruneStorage`) defaults to 7 days / ~30 GiB, matching the database-side
    window below so an operator has one clock to reason about, not several.
-2. **Hypertables**: decoded CSI records, heartbeats, features, and
+2. **Realtime mode: a burst changes what's captured, not the mechanism.**
+   An operator (in practice, mostly the box experiment below) can ask nodes
+   to temporarily sound/capture at a much higher rate via
+   `POST /api/realtime` (`docs/device-api.md`), for up to a bounded window
+   (default 600s, max 3600s) that the **node itself** enforces against its
+   own local clock (`expiresAt`) -- a node that loses contact with the
+   server simply reverts to normal on its own, never staying bursted
+   indefinitely. The control path is plain authenticated HTTP
+   (`GET /device/mode`, polled every 60s in normal mode / 10s while in
+   realtime, so enabling has up to ~60s of latency before every node has
+   picked it up) -- **the "no server -> node channel in v1" property of the
+   UDP wire protocol (`docs/protocol.md` section 1) is unchanged**;
+   realtime mode does not add one.
+
+   Crucially, a burst does not change what reaches the database at a higher
+   rate: `@homecsi/ingest`'s per-`(node_id, link_mac)` persisted-rate
+   ceiling (`packages/ingest/src/persistedRateLimiter.ts`) is **always on
+   and mode-independent** -- it lives in the ingest process, which
+   deliberately has no coordination channel to the API process's in-memory
+   realtime state, so "the save rate never changes" for house nodes is an
+   enforced invariant, not a mode behaviour. During a burst the database
+   therefore holds only a decimated sample of what was actually captured;
+   the **raw capture tree (point 1 above) keeps everything**, uncapped,
+   exactly as it does outside a burst. The one exception is the box
+   experiment: while a `box_sessions` row is open, `role = 'box'` nodes
+   bypass the ceiling so a take's dense burst does land in full in
+   `csi_records` (see the box experiment section above and
+   `docs/box-experiment.md`) -- house-node records are never bypassed,
+   burst or not.
+3. **Hypertables**: decoded CSI records, heartbeats, features, and
    occupancy states are written to TimescaleDB hypertables (see
    `packages/db` migrations 001-002 for the base schema, 003 for the first
    compression/retention pass, and 007 for the debug-window retightening
    and the `training_features` table below). Time is the hypertable
    partitioning dimension throughout.
-3. **Compression + retention, split by what each table actually is**
+4. **Compression + retention, split by what each table actually is**
    (migration 007):
    - `csi_records` and `features` are raw/near-raw, high-volume tables --
      both compress after a short hot window and are retained
@@ -246,7 +348,7 @@ accidental side effect of however long raw data happens to survive.
      so a fast one-tap annotation UI's inevitable mis-taps can be undone
      without the append-only guarantee `labels` needs for training-corpus
      integrity.
-4. **Training-set preservation**: `features` rows are chunk-granular under
+5. **Training-set preservation**: `features` rows are chunk-granular under
    `drop_chunks`, which cannot selectively exempt individual rows -- so
    rows worth keeping past 7 days are **copied out**, not left in place.
    `packages/labeling` copies raw per-link feature rows overlapping a
@@ -324,7 +426,7 @@ accidental side effect of however long raw data happens to survive.
    deployment's entire session history -- see `docs/deployment.md`
    "Scheduling the training-set preservation sweep" for the operator-facing
    scheduling guidance this requires.
-5. **Features -> occupancy -> API/UI**: windowed amplitude features are
+6. **Features -> occupancy -> API/UI**: windowed amplitude features are
    computed from the hypertables (B4), fed into the latched occupancy state
    machine (B4), and served to the API and web UI (B5) for display and
    historical query. `homecsi train` reads both `features` and

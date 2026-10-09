@@ -120,4 +120,53 @@ logging:
   it('rejects a nonexistent file with a useful message', () => {
     expect(() => loadConfig('/does/not/exist.yaml', {})).toThrow(ConfigError);
   });
+
+  it('loads a config with no `realtime:` key at all, exactly as before that section existed', () => {
+    // Brief B1's `realtime` section (persisted-rate ceiling + the realtime
+    // control plane) must be entirely optional, like `training`/`ota` --
+    // an existing deployment's config.yaml that predates this key must
+    // keep loading and behaving exactly as it did before.
+    const file = writeTempYaml(`
+server:
+  udp: { host: "0.0.0.0", port: 5566 }
+  http: { host: "0.0.0.0", port: 8080 }
+  apiToken: "0123456789abcdef"
+database:
+  host: "127.0.0.1"
+  port: 5432
+  database: "homecsi"
+  user: "homecsi"
+  password: "x"
+  pool: { min: 1, max: 10 }
+nodes:
+  - id: 1
+    name: "n1"
+    room: "r1"
+    psk: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+storage:
+  captureDir: "./data"
+  rotation: { maxBytes: 1000, maxIntervalMs: 1000 }
+  retention: { maxAgeMs: 1000, maxTotalBytes: 1000 }
+  compression: { enabled: true, afterMs: 1000 }
+features:
+  windowMs: 2000
+  hopMs: 500
+  subcarrierSelection: "all"
+  baselineAdaptationRate: 0.02
+occupancy:
+  thresholds: { motionOnThreshold: 1, motionOffThreshold: 1 }
+  latchDecayHorizonMs: 1000
+  hysteresisMs: 1000
+  multiOccupancy: { crossNodeSimultaneityThresholdMs: 1000 }
+logging:
+  level: "info"
+  file: { path: "./log", maxFiles: 1, maxSizeMb: 1 }
+`);
+    const config = loadConfig(file, {});
+    expect(config.realtime).toBeUndefined();
+    // The rest of the config still loads normally -- an omitted optional
+    // section is not a startup error and does not affect anything else.
+    expect(config.nodes[0]?.role).toBe('house'); // still defaults, even with no `role:` key
+    expect(config.server.udp.port).toBe(5566);
+  });
 });

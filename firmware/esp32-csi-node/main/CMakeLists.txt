@@ -12,6 +12,7 @@ idf_component_register(
         "heartbeat.c"
         "status_led.c"
         "ota.c"
+        "mode_client.c"
     INCLUDE_DIRS "."
     REQUIRES
         csi_protocol      # shared wire format, also compiled by ../../tests

@@ -4,6 +4,7 @@
     { "path": "packages/protocol" },
     { "path": "packages/config" },
     { "path": "packages/db" },
+    { "path": "packages/box" },
     { "path": "packages/cli" },
     { "path": "packages/ingest" },
     { "path": "packages/storage" },
